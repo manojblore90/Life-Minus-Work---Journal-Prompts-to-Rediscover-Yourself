@@ -1,0 +1,658 @@
+{
+  "themes": [
+    "Identity",
+    "Growth",
+    "Connection",
+    "Peace",
+    "Adventure",
+    "Contribution"
+  ],
+  "questions": [
+    {
+      "id": "Q1",
+      "section": "Who Am I Now?",
+      "text": "What feels most important to me at this stage of life?",
+      "choices": [
+        {
+          "label": "Knowing who I am beyond work or titles",
+          "weights": {
+            "Identity": 2
+          }
+        },
+        {
+          "label": "Learning and trying new things",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "Spending time with the right people",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "Feeling calm, grounded, and well",
+          "weights": {
+            "Peace": 2
+          }
+        },
+        {
+          "label": "Exploring new places and experiences",
+          "weights": {
+            "Adventure": 2
+          }
+        },
+        {
+          "label": "Giving back or mentoring others",
+          "weights": {
+            "Contribution": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q2",
+      "section": "Who Am I Now?",
+      "text": "What brings me peace when everything feels uncertain?",
+      "choices": [
+        {
+          "label": "Quiet reflection or journaling",
+          "weights": {
+            "Peace": 2,
+            "Identity": 1
+          }
+        },
+        {
+          "label": "Talking with close friends or family",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "Moving my body—walks, yoga, exercise",
+          "weights": {
+            "Peace": 1,
+            "Growth": 1
+          }
+        },
+        {
+          "label": "Creative hobbies (music, art, gardening)",
+          "weights": {
+            "Identity": 1,
+            "Peace": 1
+          }
+        },
+        {
+          "label": "Being in nature",
+          "weights": {
+            "Peace": 2,
+            "Adventure": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q3",
+      "section": "Who Am I Now?",
+      "text": "What part of myself have I neglected that wants to come forward?",
+      "choices": [
+        {
+          "label": "My creative side",
+          "weights": {
+            "Identity": 2
+          }
+        },
+        {
+          "label": "My learner/curious side",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "My social side",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "My need for rest and balance",
+          "weights": {
+            "Peace": 2
+          }
+        },
+        {
+          "label": "My adventurous spirit",
+          "weights": {
+            "Adventure": 2
+          }
+        },
+        {
+          "label": "My desire to contribute",
+          "weights": {
+            "Contribution": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q4",
+      "section": "The Life I Want to Create",
+      "text": "What kind of days make me feel most alive?",
+      "choices": [
+        {
+          "label": "Days with meaningful conversations",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "Days with time to learn/build something",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "Days that are calm and unhurried",
+          "weights": {
+            "Peace": 2
+          }
+        },
+        {
+          "label": "Days exploring new places or activities",
+          "weights": {
+            "Adventure": 2
+          }
+        },
+        {
+          "label": "Days spent on a passion project",
+          "weights": {
+            "Identity": 2
+          }
+        },
+        {
+          "label": "Days where I help or mentor someone",
+          "weights": {
+            "Contribution": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q5",
+      "section": "The Life I Want to Create",
+      "text": "What does freedom look like to me now?",
+      "choices": [
+        {
+          "label": "Being myself without needing to prove anything",
+          "weights": {
+            "Identity": 2,
+            "Peace": 1
+          }
+        },
+        {
+          "label": "Time freedom to learn and grow",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "Fewer obligations, more space for what matters",
+          "weights": {
+            "Peace": 2
+          }
+        },
+        {
+          "label": "Spontaneous travel and experiences",
+          "weights": {
+            "Adventure": 2
+          }
+        },
+        {
+          "label": "Choosing people and communities that energize me",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "Using my time to make a difference",
+          "weights": {
+            "Contribution": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q6",
+      "section": "The Life I Want to Create",
+      "text": "What hobbies or interests have I always wanted to explore?",
+      "choices": [
+        {
+          "label": "Creative arts (painting, writing, music)",
+          "weights": {
+            "Identity": 2
+          }
+        },
+        {
+          "label": "Learning new skills or topics",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "Clubs, groups, or social activities",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "Mindfulness, yoga, or wellness",
+          "weights": {
+            "Peace": 2
+          }
+        },
+        {
+          "label": "Outdoor adventures",
+          "weights": {
+            "Adventure": 2
+          }
+        },
+        {
+          "label": "Volunteering or mentoring",
+          "weights": {
+            "Contribution": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q7",
+      "section": "Letting Go & Moving Forward",
+      "text": "What am I holding on to that no longer serves me?",
+      "choices": [
+        {
+          "label": "Old labels or expectations about who I must be",
+          "weights": {
+            "Identity": 2
+          }
+        },
+        {
+          "label": "Perfectionism around learning/doing it 'right'",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "Relationships that drain my energy",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "Constant busyness or over-commitment",
+          "weights": {
+            "Peace": 2
+          }
+        },
+        {
+          "label": "Fear of new experiences",
+          "weights": {
+            "Adventure": 2
+          }
+        },
+        {
+          "label": "Guilt about not giving enough",
+          "weights": {
+            "Contribution": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q8",
+      "section": "Letting Go & Moving Forward",
+      "text": "What fears have been quietly running the show?",
+      "choices": [
+        {
+          "label": "Losing my sense of self",
+          "weights": {
+            "Identity": 2
+          }
+        },
+        {
+          "label": "Falling behind or being 'not good enough'",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "Being alone or misunderstood",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "Never finding real calm or balance",
+          "weights": {
+            "Peace": 2
+          }
+        },
+        {
+          "label": "Missing out on life’s adventures",
+          "weights": {
+            "Adventure": 2
+          }
+        },
+        {
+          "label": "Not making a meaningful impact",
+          "weights": {
+            "Contribution": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q9",
+      "section": "Letting Go & Moving Forward",
+      "text": "What boundaries will protect my peace going forward?",
+      "choices": [
+        {
+          "label": "Saying no to roles that don't fit who I am",
+          "weights": {
+            "Identity": 2,
+            "Peace": 1
+          }
+        },
+        {
+          "label": "Time blocks for learning and growth",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "Limiting time with draining people",
+          "weights": {
+            "Connection": 2,
+            "Peace": 1
+          }
+        },
+        {
+          "label": "Non-negotiable rest/quiet time",
+          "weights": {
+            "Peace": 2
+          }
+        },
+        {
+          "label": "Planning restorative adventures",
+          "weights": {
+            "Adventure": 2
+          }
+        },
+        {
+          "label": "Dedicating time to give back, sustainably",
+          "weights": {
+            "Contribution": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q10",
+      "section": "Celebrating My Past Self",
+      "text": "What is something I’ve done that I’m deeply proud of?",
+      "choices": [
+        {
+          "label": "Becoming who I am despite obstacles",
+          "weights": {
+            "Identity": 2
+          }
+        },
+        {
+          "label": "Learning, mastering, or teaching a skill",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "Building and sustaining relationships",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "Maintaining balance through challenges",
+          "weights": {
+            "Peace": 2
+          }
+        },
+        {
+          "label": "Braving big changes or adventures",
+          "weights": {
+            "Adventure": 2
+          }
+        },
+        {
+          "label": "Serving others or creating positive impact",
+          "weights": {
+            "Contribution": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q11",
+      "section": "Celebrating My Past Self",
+      "text": "What experiences taught me the most about resilience?",
+      "choices": [
+        {
+          "label": "Redefining myself after setbacks",
+          "weights": {
+            "Identity": 2
+          }
+        },
+        {
+          "label": "Learning from failures and trying again",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "Leaning on community during hard times",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "Finding calm in the storm",
+          "weights": {
+            "Peace": 2
+          }
+        },
+        {
+          "label": "Taking risks that stretched me",
+          "weights": {
+            "Adventure": 2
+          }
+        },
+        {
+          "label": "Showing up for others when it was hard",
+          "weights": {
+            "Contribution": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q12",
+      "section": "Celebrating My Past Self",
+      "text": "What parts of me have remained strong and steady through it all?",
+      "choices": [
+        {
+          "label": "A grounded sense of who I am",
+          "weights": {
+            "Identity": 2
+          }
+        },
+        {
+          "label": "A love for learning and growth",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "Kindness and connection with others",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "Calm, presence, and perspective",
+          "weights": {
+            "Peace": 2
+          }
+        },
+        {
+          "label": "Curiosity and courage to explore",
+          "weights": {
+            "Adventure": 2
+          }
+        },
+        {
+          "label": "A heart for contribution",
+          "weights": {
+            "Contribution": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q13",
+      "section": "Moments That Changed Me",
+      "text": "What was a turning point in my life, and what did I learn from it?",
+      "choices": [
+        {
+          "label": "I redefined who I am",
+          "weights": {
+            "Identity": 2
+          }
+        },
+        {
+          "label": "I discovered a new path through learning",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "I found the right people and support",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "I learned to slow down and breathe",
+          "weights": {
+            "Peace": 2
+          }
+        },
+        {
+          "label": "I embraced a bold new experience",
+          "weights": {
+            "Adventure": 2
+          }
+        },
+        {
+          "label": "I realized I want to give more",
+          "weights": {
+            "Contribution": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q14",
+      "section": "Moments That Changed Me",
+      "text": "When did I surprise myself with strength or courage?",
+      "choices": [
+        {
+          "label": "Standing firm in who I am",
+          "weights": {
+            "Identity": 2
+          }
+        },
+        {
+          "label": "Persisting through a steep learning curve",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "Being vulnerable with others",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "Choosing rest over hustle",
+          "weights": {
+            "Peace": 2
+          }
+        },
+        {
+          "label": "Saying yes to an adventure",
+          "weights": {
+            "Adventure": 2
+          }
+        },
+        {
+          "label": "Serving when it wasn’t easy",
+          "weights": {
+            "Contribution": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q15",
+      "section": "Moments That Changed Me",
+      "text": "What event shifted my priorities forever?",
+      "choices": [
+        {
+          "label": "Reframing my identity",
+          "weights": {
+            "Identity": 2
+          }
+        },
+        {
+          "label": "Realizing learning matters more than status",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "Understanding who my people really are",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "Discovering the value of inner peace",
+          "weights": {
+            "Peace": 2
+          }
+        },
+        {
+          "label": "Choosing a path of exploration",
+          "weights": {
+            "Adventure": 2
+          }
+        },
+        {
+          "label": "Committing to contribute in a bigger way",
+          "weights": {
+            "Contribution": 2
+          }
+        }
+      ]
+    }
+  ]
+}
