@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import datetime
+import unicodedata
 from pathlib import Path
 import streamlit as st
 from fpdf import FPDF
@@ -14,7 +15,7 @@ st.set_page_config(page_title=APP_TITLE, page_icon="✨", layout="centered")
 st.title(APP_TITLE)
 st.caption("🩺 Diagnostic: App is running. Use the sidebar to verify files.")
 
-# Diagnostics (helps avoid blank-page mysteries)
+# Diagnostics
 st.sidebar.header("Diagnostics")
 st.sidebar.write("Python:", sys.version)
 st.sidebar.write("Working dir:", os.getcwd())
@@ -34,6 +35,22 @@ def load_questions(filename="questions.json"):
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     return data["questions"], data.get("themes", [])
+
+# ---- PDF safety: sanitize text to Latin-1 (FPDF core fonts are Latin-1 only) ----
+def safe_text(s: str) -> str:
+    if s is None:
+        return ""
+    s = str(s)
+    # Keep common punctuation by mapping to ASCII
+    s = (s.replace("\u2019", "'")  # right single quote
+           .replace("\u2018", "'")  # left single quote
+           .replace("\u201c", '"')  # left double quote
+           .replace("\u201d", '"')  # right double quote
+           .replace("\u2013", "-")  # en dash
+           .replace("\u2014", "-")) # em dash
+    # Normalize and strip any remaining unsupported chars
+    s = unicodedata.normalize("NFKD", s).encode("latin-1", "ignore").decode("latin-1")
+    return s
 
 # Optional AI
 USE_AI = bool(os.getenv("OPENAI_API_KEY"))
@@ -107,36 +124,38 @@ def make_pdf_bytes(name_email, scores, top3, narrative):
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
     pdf.set_font("Arial", "B", 18)
-    pdf.cell(0, 10, REPORT_TITLE, ln=True)
+    pdf.cell(0, 10, safe_text(REPORT_TITLE), ln=True)
     pdf.set_font("Arial", "", 12)
     today = datetime.date.today().strftime("%d %b %Y")
-    pdf.cell(0, 8, f"Date: {today}", ln=True)
+    pdf.cell(0, 8, safe_text(f"Date: {today}"), ln=True)
     if name_email:
-        pdf.cell(0, 8, f"Email: {name_email}", ln=True)
+        pdf.cell(0, 8, safe_text(f"Email: {name_email}"), ln=True)
     pdf.ln(6)
 
     pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 8, "Your Theme Snapshot", ln=True)
+    pdf.cell(0, 8, safe_text("Your Theme Snapshot"), ln=True)
     pdf.set_font("Arial", "", 12)
     for t in THEMES:
-        pdf.cell(0, 7, f"- {t}: {scores.get(t, 0)}", ln=True)
+        pdf.cell(0, 7, safe_text(f"- {t}: {scores.get(t, 0)}"), ln=True)
     pdf.ln(4)
 
     pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 8, "Top Themes", ln=True)
+    pdf.cell(0, 8, safe_text("Top Themes"), ln=True)
     pdf.set_font("Arial", "", 12)
-    pdf.multi_cell(0, 6, ", ".join(top3))
+    pdf.multi_cell(0, 6, safe_text(", ".join(top3)))
     pdf.ln(2)
 
     pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 8, "Your Personalized Guidance", ln=True)
+    pdf.cell(0, 8, safe_text("Your Personalized Guidance"), ln=True)
     pdf.set_font("Arial", "", 12)
-    for line in narrative.split("\n"):
+    for line in safe_text(narrative).split("\n"):
         pdf.multi_cell(0, 6, line)
 
     pdf.ln(6)
     pdf.set_font("Arial", "I", 10)
-    pdf.multi_cell(0, 6, "Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice.")
+    pdf.multi_cell(0, 6, safe_text("Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice."))
+
+    # Return bytes for Streamlit download
     return pdf.output(dest="S").encode("latin-1")
 
 st.divider()
@@ -171,7 +190,7 @@ if st.session_state.get('submitted_once'):
         st.divider()
 
     st.subheader("Step 3: Get your report")
-    if len(answers) < len(questions):
+    if len(answers) < len(questions]):
         st.info(f"Answered {len(answers)} of {len(questions)} questions. Keep going!")
     else:
         if st.button("Finish and Generate My Report"):
