@@ -10,8 +10,9 @@ THEMES = ["Identity", "Growth", "Connection", "Peace", "Adventure", "Contributio
 
 st.set_page_config(page_title=APP_TITLE, page_icon="✨", layout="centered")
 st.title(APP_TITLE)
-st.caption("🩺 Diagnostic: If you see this, the app is running. Use the sidebar to verify files.")
+st.caption("🩺 Diagnostic: App is running. Use the sidebar to verify files.")
 
+# Diagnostics
 st.sidebar.header("Diagnostics")
 st.sidebar.write("Python:", sys.version)
 st.sidebar.write("Working dir:", os.getcwd())
@@ -32,6 +33,7 @@ def load_questions(filename="questions.json"):
         data = json.load(f)
     return data["questions"], data.get("themes", [])
 
+# Optional AI
 USE_AI = True if os.getenv("OPENAI_API_KEY") else False
 if USE_AI:
     try:
@@ -45,7 +47,8 @@ def compute_scores(answers, questions):
     for q in questions:
         qid = q["id"]
         choice_idx = answers.get(qid)
-        if choice_idx is None: continue
+        if choice_idx is None:
+            continue
         try:
             choice = q["choices"][choice_idx]
         except IndexError:
@@ -74,19 +77,23 @@ def ai_paragraph(prompt):
         return None
 
 def generate_report_text(email, scores, top3):
-    base_copy = ["Thank you for completing the Reflection Quiz. Below are your top themes and next-step ideas tailored for you."]
-    base_copy += [f"- {t}: Consider one simple action this week to build momentum." for t in top3]
-    base_copy += ["Tip: Small consistent actions beat big one-off efforts. Be kind to yourself as you experiment."]
-    fallback = "\\n".join(base_copy)
+    base_copy = [
+        "Thank you for completing the Reflection Quiz. Below are your top themes and next-step ideas tailored for you."
+    ] + [f"- {theme}: Consider one simple action this week to build momentum." for theme in top3] + [
+        "Tip: Small consistent actions beat big one-off efforts. Be kind to yourself as you experiment."
+    ]
+    fallback = "\n".join(base_copy)
+
     if USE_AI:
         score_lines = ", ".join([f"{k}: {v}" for k, v in scores.items()])
-        prompt = f\"\"\"Create a friendly, empowering summary (140-200 words) for a user with these theme scores: {score_lines}.
+        prompt = f"""Create a friendly, empowering summary (140-200 words) for a user with these theme scores: {score_lines}.
 Top 3 themes: {', '.join(top3)}.
 Voice: empathetic, practical, and encouraging; avoid medical claims.
 Give 3 short bullet-point actions for the next 7 days, tailored to the themes.
-Do not mention scores. Address the reader as 'you'.\"\"\"
-        text = ai_paragraph(prompt)
-        if text: return text
+Do not mention scores. Address the reader as 'you'."""
+        ai_text = ai_paragraph(prompt)
+        if ai_text:
+            return ai_text
     return fallback
 
 def make_pdf_bytes(name_email, scores, top3, narrative):
@@ -108,7 +115,7 @@ def make_pdf_bytes(name_email, scores, top3, narrative):
     pdf.set_font("Arial", "", 12); pdf.multi_cell(0, 6, ", ".join(top3)); pdf.ln(2)
     pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Your Personalized Guidance", ln=True)
     pdf.set_font("Arial", "", 12)
-    for line in narrative.split("\\n"): pdf.multi_cell(0, 6, line)
+    for line in narrative.split("\n"): pdf.multi_cell(0, 6, line)
     pdf.ln(6)
     pdf.set_font("Arial", "I", 10); pdf.multi_cell(0, 6, "Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice.")
     return pdf.output(dest="S").encode("latin-1")
@@ -147,12 +154,20 @@ if st.session_state.get('submitted_once'):
         if st.button("Finish and Generate My Report"):
             scores = compute_scores(answers, questions)
             top3 = top_themes(scores, 3)
-            narrative = generate_report_text(st.session_state.get('email',''), scores, top3)
+            narrative = "Thank you for completing the Reflection Quiz. Below are your top themes and next-step ideas tailored for you.\n" +                         "\n".join([f"- {t}: Consider one simple action this week to build momentum." for t in top3]) +                         "\nTip: Small consistent actions beat big one-off efforts. Be kind to yourself as you experiment."
+            if USE_AI:
+                score_lines = ", ".join([f"{k}: {v}" for k, v in scores.items()])
+                prompt = f"""Create a friendly, empowering summary (140-200 words) for a user with these theme scores: {score_lines}.
+Top 3 themes: {', '.join(top3)}.
+Voice: empathetic, practical, and encouraging; avoid medical claims.
+Give 3 short bullet-point actions for the next 7 days, tailored to the themes.
+Do not mention scores. Address the reader as 'you'."""
+                ai_text = ai_paragraph(prompt)
+                if ai_text: narrative = ai_text
             pdf_bytes = make_pdf_bytes(st.session_state.get('email',''), scores, top3, narrative)
             st.success("Your personalized report is ready!")
             st.download_button("Download Your PDF Report", data=pdf_bytes,
                                file_name="LifeMinusWork_Reflection_Report.pdf", mime="application/pdf")
-            # Save to /tmp
             try:
                 import csv
                 ts = datetime.datetime.now().isoformat(timespec="seconds")
