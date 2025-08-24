@@ -1,3 +1,4 @@
+
 import os
 import json
 import datetime
@@ -77,12 +78,7 @@ def ai_sections_and_weights(
     free_responses: List[dict],
     first_name: str
 ) -> Optional[dict]:
-    """
-    Ask the model for:
-      - summary (140–220 words), actions[3], weekly_plan[7]
-      - weights: mapping of question_id -> {theme: -2..+2} for free-text answers
-    Returns dict with keys: summary, actions, weekly_plan, weights
-    """
+    """Deep read + weights for free-text answers."""
     if not USE_AI:
         return None
     try:
@@ -90,23 +86,29 @@ def ai_sections_and_weights(
         client = OpenAI()
 
         score_lines = ", ".join([f"{k}: {v}" for k, v in scores.items()])
-        # Pack free responses compactly for lower token use
         packed = [
-            {"id": fr["id"], "q": fr["question"], "a": fr["answer"][:280]}
+            {"id": fr["id"], "q": fr["question"], "a": str(fr.get("answer", ""))[:280]}
             for fr in free_responses if fr.get("answer")
         ]
 
         prompt = (
             "You are a warm, practical life coach. Return ONLY valid JSON with keys:\n"
-            "  summary (string, 140-220 words, address the user by first name),\n"
+            "  archetype (string), core_need (string),\n"
+            "  deep_insight (string, 140-220 words, address the user by first name),\n"
+            "  why_now (string, 60-100 words),\n"
+            "  strengths (array of 3-5 short strings),\n"
+            "  energizers (array of 3), drainers (array of 3),\n"
+            "  tensions (array of 1-2 short strings), blindspot (string <= 40 words),\n"
             "  actions (array of EXACTLY 3 short bullet strings),\n"
+            "  if_then (array of EXACTLY 3 implementation-intention strings like: 'If it’s 7pm, then I…'),\n"
             "  weekly_plan (array of 7 brief day-plan strings),\n"
-            "  weights (object mapping question_id -> object of theme:int scores in [-2,2]).\n"
+            "  affirmation (string <= 15 words), quote (string <= 20 words),\n"
+            "  weights (object mapping question_id -> object of theme:int in [-2,2]).\n"
             f"User first name: {first_name or 'Friend'}.\n"
             f"Theme scores so far: {score_lines}.\n"
             f"Top 3 themes: {', '.join(top3)}.\n"
-            "Also consider these free-text answers. If a question isn't in the list, omit it from weights.\n"
-            f"Free responses: {json.dumps(packed, ensure_ascii=False)}\n"
+            "Also consider these free-text answers (omit weights for questions you don't see):\n"
+            f"{json.dumps(packed, ensure_ascii=False)}\n"
             "Tone: empathetic, encouraging, plain language. No medical/clinical claims. JSON only."
         )
 
@@ -123,15 +125,25 @@ def ai_sections_and_weights(
         raw = resp.output_text or "{}"
         data = json.loads(raw)
 
-        # normalize shapes
         out = {
-            "summary": str(data.get("summary", "")),
-            "actions": [str(a) for a in (data.get("actions") or [])][:3],
-            "weekly_plan": [str(a) for a in (data.get("weekly_plan") or [])][:7],
+            "archetype": str(data.get("archetype", "")),
+            "core_need": str(data.get("core_need", "")),
+            "deep_insight": str(data.get("deep_insight", "")),
+            "why_now": str(data.get("why_now", "")),
+            "strengths": [str(x) for x in (data.get("strengths") or [])][:5],
+            "energizers": [str(x) for x in (data.get("energizers") or [])][:3],
+            "drainers": [str(x) for x in (data.get("drainers") or [])][:3],
+            "tensions": [str(x) for x in (data.get("tensions") or [])][:2],
+            "blindspot": str(data.get("blindspot", "")),
+            "actions": [str(x) for x in (data.get("actions") or [])][:3],
+            "if_then": [str(x) for x in (data.get("if_then") or [])][:3],
+            "weekly_plan": [str(x) for x in (data.get("weekly_plan") or [])][:7],
+            "affirmation": str(data.get("affirmation", "")),
+            "quote": str(data.get("quote", "")),
             "weights": {},
         }
+
         weights = data.get("weights") or {}
-        # ensure only known themes and int in [-2,2]
         for qid, w in weights.items():
             clean = {}
             if isinstance(w, dict):
@@ -174,6 +186,20 @@ def apply_free_text_weights(scores: Dict[str, int], ai_weights: Dict[str, Dict[s
 def top_themes(scores: Dict[str, int], k: int = 3) -> List[str]:
     return [name for name, _ in sorted(scores.items(), key=lambda x: x[1], reverse=True)[:k]]
 
+def lowest_themes(scores: Dict[str, int], k: int = 2) -> List[str]:
+    return [name for name, _ in sorted(scores.items(), key=lambda x: x[1])[:k]]
+
+def balancing_suggestion(theme: str) -> str:
+    suggestions = {
+        "Identity": "Choose one tiny ritual that reflects who you’re becoming.",
+        "Growth": "Pick a single skill and block 15 minutes to practice today.",
+        "Connection": "Send a 3-line check-in to someone who matters.",
+        "Peace": "Name a 10-minute wind-down you’ll repeat daily.",
+        "Adventure": "Plan a 30–60 minute micro-adventure within 7 days.",
+        "Contribution": "Offer one concrete act of help this week.",
+    }
+    return suggestions.get(theme, "Take one small, visible step this week.")
+
 # ---------- Pretty PDF ----------
 def draw_scores_barchart(pdf: FPDF, scores: Dict[str, int]):
     pdf.set_font("Arial", "B", 14)
@@ -213,6 +239,17 @@ def bullets(pdf: FPDF, title: str, items: List[str]):
         pdf.multi_cell(0, 6, safe_text(it))
     pdf.ln(1)
 
+def checkbox_line(pdf: FPDF, text: str):
+    x = pdf.get_x()
+    y = pdf.get_y()
+    pdf.rect(x, y + 1.5, 4, 4)  # little square
+    pdf.set_x(x + 6)
+    pdf.multi_cell(0, 6, safe_text(text))
+
+def label_value(pdf: FPDF, label: str, value: str):
+    pdf.set_font("Arial", "B", 12); pdf.cell(0, 6, safe_text(label), ln=True)
+    pdf.set_font("Arial", "", 12);  pdf.multi_cell(0, 6, safe_text(value))
+
 def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: List[str],
                    sections: dict, free_responses: List[dict], logo_path: Optional[str]) -> bytes:
     pdf = FPDF()
@@ -222,8 +259,7 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
     # Logo (optional)
     if logo_path:
         try:
-            pdf.image(logo_path, w=40)
-            pdf.ln(2)
+            pdf.image(logo_path, w=40); pdf.ln(2)
         except Exception:
             pass
 
@@ -237,28 +273,109 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
     pdf.cell(0, 8, safe_text(f"Date: {today}"), ln=True)
     if email:
         pdf.cell(0, 8, safe_text(f"Email: {email}"), ln=True)
-    pdf.ln(2)
+    pdf.ln(1)
+
+    # Archetype & core need (if present)
+    if sections.get("archetype") or sections.get("core_need"):
+        label_value(pdf, "Archetype", sections.get("archetype","") or "—")
+        label_value(pdf, "Core Need", sections.get("core_need","") or "—")
+        pdf.ln(1)
 
     # Top themes
-    pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 8, safe_text("Top Themes"), ln=True)
-    pdf.set_font("Arial", "", 12)
-    pdf.multi_cell(0, 6, safe_text(", ".join(top3)))
-    pdf.ln(2)
+    pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, safe_text("Top Themes"), ln=True)
+    pdf.set_font("Arial", "", 12);  pdf.multi_cell(0, 6, safe_text(", ".join(top3))); pdf.ln(1)
 
-    # Bars
+    # Score bars
     draw_scores_barchart(pdf, scores)
 
-    # Narrative
-    paragraph(pdf, "Personalized Summary", sections.get("summary", ""))
-    bullets(pdf, "Three Next-Step Actions (7 days)", sections.get("actions", []))
-    weekly = [f"Day {i+1}: {t}" for i, t in enumerate(sections.get("weekly_plan", []))]
-    bullets(pdf, "1-Week Gentle Plan", weekly)
+    # Insight blocks
+    if sections.get("deep_insight"):
+        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, safe_text("What this really says about you"), ln=True)
+        pdf.set_font("Arial", "", 12)
+        for line in safe_text(sections["deep_insight"]).split("\n"):
+            pdf.multi_cell(0, 6, line)
+        pdf.ln(1)
+
+    if sections.get("why_now"):
+        label_value(pdf, "Why this matters now", sections["why_now"]); pdf.ln(1)
+
+    # Strengths / Energizers / Drainers
+    if sections.get("strengths"):
+        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Signature strengths", ln=True)
+        pdf.set_font("Arial", "", 12)
+        for s in sections["strengths"]:
+            pdf.cell(4, 6, "*"); pdf.multi_cell(0, 6, safe_text(s))
+        pdf.ln(1)
+
+    if sections.get("energizers") or sections.get("drainers"):
+        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Energy map", ln=True)
+        pdf.set_font("Arial", "B", 12); pdf.cell(0, 6, "Energizers", ln=True)
+        pdf.set_font("Arial", "", 12)
+        for e in sections.get("energizers", []):
+            pdf.cell(4, 6, "+"); pdf.multi_cell(0, 6, safe_text(e))
+        pdf.ln(1)
+        pdf.set_font("Arial", "B", 12); pdf.cell(0, 6, "Drainers", ln=True)
+        pdf.set_font("Arial", "", 12)
+        for d in sections.get("drainers", []):
+            pdf.cell(4, 6, "–"); pdf.multi_cell(0, 6, safe_text(d))
+        pdf.ln(1)
+
+    # Tensions & blindspot
+    if sections.get("tensions"):
+        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Hidden tensions", ln=True)
+        pdf.set_font("Arial", "", 12)
+        for t in sections["tensions"]:
+            pdf.cell(4, 6, "*"); pdf.multi_cell(0, 6, safe_text(t))
+        pdf.ln(1)
+    if sections.get("blindspot"):
+        label_value(pdf, "Watch-out (gentle blind spot)", sections["blindspot"]); pdf.ln(1)
+
+    # Actions & If–Then plans
+    if sections.get("actions"):
+        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "3 next-step actions (7 days)", ln=True)
+        pdf.set_font("Arial", "", 12)
+        for a in sections["actions"]:
+            checkbox_line(pdf, a)
+        pdf.ln(1)
+
+    if sections.get("if_then"):
+        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Implementation intentions (If–Then)", ln=True)
+        pdf.set_font("Arial", "", 12)
+        for it in sections["if_then"]:
+            pdf.cell(4, 6, "*"); pdf.multi_cell(0, 6, safe_text(it))
+        pdf.ln(1)
+
+    # Weekly plan
+    if sections.get("weekly_plan"):
+        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "1-week gentle plan", ln=True)
+        pdf.set_font("Arial", "", 12)
+        for i, item in enumerate(sections["weekly_plan"][:7]):
+            pdf.cell(0, 6, safe_text(f"Day {i+1}: {item}"), ln=True)
+        pdf.ln(1)
+
+    # Balancing Opportunity (lowest 1–2 themes)
+    lows = [name for name, _ in sorted(scores.items(), key=lambda x: x[1])[:2]]
+    if lows:
+        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Balancing Opportunity", ln=True)
+        pdf.set_font("Arial", "", 12)
+        for theme in lows:
+            tip = balancing_suggestion(theme)
+            pdf.multi_cell(0, 6, safe_text(f"{theme}: {tip}"))
+        pdf.ln(1)
+
+    # Quote & affirmation
+    if sections.get("affirmation") or sections.get("quote"):
+        pdf.set_font("Arial", "B", 12); pdf.cell(0, 6, "Keep this in view", ln=True)
+        pdf.set_font("Arial", "I", 11)
+        if sections.get("affirmation"):
+            pdf.multi_cell(0, 6, safe_text(f"Affirmation: {sections['affirmation']}"))
+        if sections.get("quote"):
+            pdf.multi_cell(0, 6, safe_text(f"\u201c{sections['quote']}\u201d"))
+        pdf.ln(2)
 
     # Your reflections (free text)
     if free_responses:
-        pdf.set_font("Arial", "B", 14)
-        pdf.cell(0, 8, safe_text("Your Reflections"), ln=True)
+        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Your words we heard", ln=True)
         pdf.set_font("Arial", "", 12)
         for fr in free_responses:
             if not fr.get("answer"): continue
@@ -266,11 +383,21 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
             pdf.multi_cell(0, 6, safe_text(f"  {fr['answer']}"))
             pdf.ln(1)
 
-    # Footer
-    pdf.set_font("Arial", "I", 10)
+    # Tiny Progress Tracker (checkboxes)
+    pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Tiny Progress Tracker", ln=True)
+    pdf.set_font("Arial", "", 12)
+    milestones = sections.get("actions") or [
+        "Choose one tiny step and schedule it.",
+        "Tell a friend your plan for gentle accountability.",
+        "Spend 20 minutes on your step and celebrate completion."
+    ]
+    for m in milestones[:3]:
+        checkbox_line(pdf, m)
     pdf.ln(2)
-    pdf.multi_cell(0, 5, safe_text("Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice."))
 
+    # Footer
+    pdf.set_font("Arial", "I", 10); pdf.ln(2)
+    pdf.multi_cell(0, 5, safe_text("Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice."))
     return pdf.output(dest="S").encode("latin-1")
 
 # ---------- UI ----------
@@ -297,7 +424,6 @@ if st.session_state.get("first_name"):
     for q in questions:
         st.subheader(q["text"])
         options = [c["label"] for c in q["choices"]] + ["✍️ I’ll write my own answer"]
-        # radio returns the label; use a unique key per question
         selected = st.radio("Choose one:", options, index=None, key=f"{q['id']}_choice")
         choice_idx = None
         free_text_val = None
@@ -306,8 +432,7 @@ if st.session_state.get("first_name"):
             free_text_val = st.text_area("Your answer", key=f"{q['id']}_free", height=80, placeholder="Type your own response...")
         elif selected is not None:
             choice_idx = options.index(selected)
-            # adjust because we appended the custom option at the end
-            if choice_idx == len(options) - 1:
+            if choice_idx == len(options) - 1:  # the free-text option
                 choice_idx = None
 
         answers[q["id"]] = {"choice_idx": choice_idx, "free_text": free_text_val}
