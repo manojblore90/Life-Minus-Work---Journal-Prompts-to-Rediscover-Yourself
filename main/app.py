@@ -1,4 +1,3 @@
-
 import os
 import sys
 import json
@@ -14,44 +13,34 @@ THEMES = ["Identity", "Growth", "Connection", "Peace", "Adventure", "Contributio
 
 st.set_page_config(page_title=APP_TITLE, page_icon="✨", layout="centered")
 st.title(APP_TITLE)
-st.caption("🩺 Diagnostic: App is running. Use the sidebar to verify files.")
+st.write("Answer 15 questions and instantly download a personalized PDF summary.")
 
-# Diagnostics
-st.sidebar.header("Diagnostics")
-st.sidebar.write("Python:", sys.version)
-st.sidebar.write("Working dir:", os.getcwd())
-st.sidebar.write("File location:", Path(__file__).parent)
-st.sidebar.write("Env has OPENAI_API_KEY:", bool(os.getenv("OPENAI_API_KEY")))
-try:
-    st.sidebar.write("Files here:", [p.name for p in Path(__file__).parent.iterdir()])
-except Exception as e:
-    st.sidebar.error(f"Dir list error: {e}")
-
+# ------------ Data loading ------------
 def load_questions(filename: str = "questions.json"):
     base_dir = Path(__file__).parent
     path = base_dir / filename
     if not path.exists():
-        st.error(f"Could not find {filename} at {path}. It must be next to app.py in the 'main' folder.")
+        st.error(f"Could not find {filename} at {path}. It must sit next to main/app.py.")
         st.stop()
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     return data["questions"], data.get("themes", [])
 
-# ---- PDF safety: sanitize text to Latin-1 (FPDF core fonts are Latin-1 only) ----
+# ------------ PDF text safety (FPDF is Latin-1) ------------
 def safe_text(s: str) -> str:
     if s is None:
         return ""
     s = str(s)
-    s = (s.replace("\u2019", "'")    # right single quote
-           .replace("\u2018", "'")   # left single quote
-           .replace("\u201c", '"')   # left double quote
-           .replace("\u201d", '"')   # right double quote
-           .replace("\u2013", "-")   # en dash
-           .replace("\u2014", "-"))  # em dash
+    s = (s.replace("\u2019", "'")   # ’
+           .replace("\u2018", "'")  # ‘
+           .replace("\u201c", '"')  # “
+           .replace("\u201d", '"')  # ”
+           .replace("\u2013", "-")  # –
+           .replace("\u2014", "-")) # —
     s = unicodedata.normalize("NFKD", s).encode("latin-1", "ignore").decode("latin-1")
     return s
 
-# Optional AI
+# ------------ Optional AI (set OPENAI_API_KEY in Secrets to enable) ------------
 USE_AI = bool(os.getenv("OPENAI_API_KEY"))
 if USE_AI:
     try:
@@ -60,6 +49,7 @@ if USE_AI:
     except Exception:
         USE_AI = False
 
+# ------------ Scoring helpers ------------
 def compute_scores(answers: dict, questions: list) -> dict:
     scores = {t: 0 for t in THEMES}
     for q in questions:
@@ -82,7 +72,7 @@ def ai_paragraph(prompt: str) -> str | None:
     if not USE_AI:
         return None
     try:
-        response = openai_client.chat.completions.create(
+        resp = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "You are a warm, practical life coach. Be concise and supportive."},
@@ -91,7 +81,7 @@ def ai_paragraph(prompt: str) -> str | None:
             temperature=0.7,
             max_tokens=300,
         )
-        return response.choices[0].message.content.strip()
+        return resp.choices[0].message.content.strip()
     except Exception:
         return None
 
@@ -118,12 +108,15 @@ def generate_report_text(email: str, scores: dict, top3: list) -> str:
             return ai_text
     return fallback
 
+# ------------ PDF builder ------------
 def make_pdf_bytes(name_email: str, scores: dict, top3: list, narrative: str) -> bytes:
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
+
     pdf.set_font("Arial", "B", 18)
     pdf.cell(0, 10, safe_text(REPORT_TITLE), ln=True)
+
     pdf.set_font("Arial", "", 12)
     today = datetime.date.today().strftime("%d %b %Y")
     pdf.cell(0, 8, safe_text(f"Date: {today}"), ln=True)
@@ -156,31 +149,30 @@ def make_pdf_bytes(name_email: str, scores: dict, top3: list, narrative: str) ->
 
     return pdf.output(dest="S").encode("latin-1")
 
-st.divider()
-st.subheader("Step 1: Start here")
+# ------------ UI ------------
 with st.form("email_form"):
-    email = st.text_input("Your email (to save your results and for your download link)", placeholder="you@example.com")
+    email = st.text_input("Your email (for your download link)", placeholder="you@example.com")
     consent = st.checkbox("I agree to receive my results and occasional updates from Life Minus Work.")
     submitted = st.form_submit_button("Start Quiz")
     if submitted and (not email or not consent):
         st.error("Please enter your email and give consent to continue.")
 
-if 'submitted_once' not in st.session_state:
-    st.session_state['submitted_once'] = False
+if "submitted_once" not in st.session_state:
+    st.session_state["submitted_once"] = False
 if submitted and email and consent:
     st.session_state["email"] = email
-    st.session_state['submitted_once'] = True
+    st.session_state["submitted_once"] = True
     st.success("Great! Scroll down to begin.")
 
-st.divider()
-st.subheader("Step 2: Questions")
-if st.session_state.get('submitted_once'):
-    questions, _ = load_questions("questions.json")
+if st.session_state.get("submitted_once"):
+    st.header("Your Questions")
     st.caption("You can scroll and answer at your own pace.")
 
+    questions, _ = load_questions("questions.json")
     answers = {}
+
     for q in questions:
-        st.markdown(f"**{q['text']}**")
+        st.subheader(q["text"])
         options = [c["label"] for c in q["choices"]]
         choice = st.radio("Choose one:", options, index=None, key=q["id"])
         if choice is not None:
@@ -194,8 +186,8 @@ if st.session_state.get('submitted_once'):
         if st.button("Finish and Generate My Report"):
             scores = compute_scores(answers, questions)
             top3 = top_themes(scores, 3)
-            narrative = generate_report_text(st.session_state.get('email', ''), scores, top3)
-            pdf_bytes = make_pdf_bytes(st.session_state.get('email', ''), scores, top3, narrative)
+            narrative = generate_report_text(st.session_state.get("email", ""), scores, top3)
+            pdf_bytes = make_pdf_bytes(st.session_state.get("email", ""), scores, top3, narrative)
 
             st.success("Your personalized report is ready!")
             st.download_button(
@@ -215,7 +207,7 @@ if st.session_state.get('submitted_once'):
                     writer = csv.writer(f)
                     if not file_exists:
                         writer.writerow(["timestamp", "email", "scores", "top3"])
-                    writer.writerow([ts, st.session_state.get('email', ''), json.dumps(scores), json.dumps(top3)])
+                    writer.writerow([ts, st.session_state.get("email", ""), json.dumps(scores), json.dumps(top3)])
                 st.caption("Saved to /tmp/responses.csv (Cloud-safe, ephemeral).")
             except Exception as e:
                 st.caption(f"Could not save responses (demo only). {e}")
