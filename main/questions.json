@@ -9,42 +9,59 @@
   ],
   "questions": [
     {
-      "id": "Q1",
-      "section": "Who Am I Now?",
-      "text": "What feels most important to me at this stage of life?",
+      "id": "q1",
+      "text": "When you picture a deeply fulfilling week, what stands out most?",
       "choices": [
         {
-          "label": "Knowing who I am beyond work or titles",
-          "weights": {
-            "Identity": 2
-          }
-        },
-        {
-          "label": "Learning and trying new things",
-          "weights": {
-            "Growth": 2
-          }
-        },
-        {
-          "label": "Spending time with the right people",
-          "weights": {
-            "Connection": 2
-          }
-        },
-        {
-          "label": "Feeling calm, grounded, and well",
+          "label": "Quiet pockets of ease and unhurried time",
           "weights": {
             "Peace": 2
           }
         },
         {
-          "label": "Exploring new places and experiences",
+          "label": "Quality time with people who matter",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "Trying new places or experiences",
           "weights": {
             "Adventure": 2
           }
         },
         {
-          "label": "Giving back or mentoring others",
+          "label": "Learning something that expands me",
+          "weights": {
+            "Growth": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "q2",
+      "text": "Which statement feels most true right now?",
+      "choices": [
+        {
+          "label": "I want to reconnect with who I am outside of work",
+          "weights": {
+            "Identity": 2
+          }
+        },
+        {
+          "label": "I am ready to level up a skill or habit",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "I want deeper friendships and community",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "I want to do something useful for others",
           "weights": {
             "Contribution": 2
           }
@@ -52,604 +69,410 @@
       ]
     },
     {
-      "id": "Q2",
-      "section": "Who Am I Now?",
-      "text": "What brings me peace when everything feels uncertain?",
+      "id": "q3",
+      "text": "How do you usually spend a free evening?",
       "choices": [
         {
-          "label": "Quiet reflection or journaling",
+          "label": "Recharge quietly with rest, reading, or a walk",
+          "weights": {
+            "Peace": 2
+          }
+        },
+        {
+          "label": "Call or meet up with someone I care about",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "Tinker with a hobby or take a short class",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "Find a low-stakes adventure or new activity",
+          "weights": {
+            "Adventure": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "q4",
+      "text": "What kind of challenge are you craving right now?",
+      "choices": [
+        {
+          "label": "A structured plan to grow or improve",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "Something bold that stretches my comfort zone",
+          "weights": {
+            "Adventure": 2,
+            "Growth": 1
+          }
+        },
+        {
+          "label": "A chance to help or mentor someone",
+          "weights": {
+            "Contribution": 2,
+            "Connection": 1
+          }
+        },
+        {
+          "label": "Simplifying routines to feel calmer",
+          "weights": {
+            "Peace": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "q5",
+      "text": "Which relationship intention feels most important this month?",
+      "choices": [
+        {
+          "label": "Initiate meaningful conversations",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "Create or join a group I can belong to",
+          "weights": {
+            "Connection": 2,
+            "Identity": 1
+          }
+        },
+        {
+          "label": "Set kind boundaries so I have energy for people",
+          "weights": {
+            "Peace": 2,
+            "Connection": 1
+          }
+        },
+        {
+          "label": "Plan one memorable outing with someone",
+          "weights": {
+            "Adventure": 1,
+            "Connection": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "q6",
+      "text": "How do you want your work to support your life right now?",
+      "choices": [
+        {
+          "label": "Protect space for rest and routines",
+          "weights": {
+            "Peace": 2
+          }
+        },
+        {
+          "label": "Reflect my values and sense of self",
+          "weights": {
+            "Identity": 2
+          }
+        },
+        {
+          "label": "Offer growth and learning opportunities",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "Let me make a positive difference",
+          "weights": {
+            "Contribution": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "q7",
+      "text": "What helps you feel most like yourself?",
+      "choices": [
+        {
+          "label": "Time with people who truly get me",
+          "weights": {
+            "Connection": 2,
+            "Identity": 1
+          }
+        },
+        {
+          "label": "Exploring a creative or playful impulse",
+          "weights": {
+            "Adventure": 2,
+            "Identity": 1
+          }
+        },
+        {
+          "label": "Quiet morning or evening rituals",
           "weights": {
             "Peace": 2,
             "Identity": 1
           }
         },
         {
-          "label": "Talking with close friends or family",
+          "label": "Investing in a personal skill or craft",
+          "weights": {
+            "Growth": 2,
+            "Identity": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "q8",
+      "text": "How do you usually reset after stress?",
+      "choices": [
+        {
+          "label": "Slow down and do something calming",
+          "weights": {
+            "Peace": 2
+          }
+        },
+        {
+          "label": "Connect with a friend or family member",
           "weights": {
             "Connection": 2
           }
         },
         {
-          "label": "Moving my body—walks, yoga, exercise",
+          "label": "Move my body or change the scene",
           "weights": {
-            "Peace": 1,
+            "Adventure": 2
+          }
+        },
+        {
+          "label": "Reflect on what I am learning and adjust",
+          "weights": {
+            "Growth": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "q9",
+      "text": "Pick a mini-project that sounds energizing for this month.",
+      "choices": [
+        {
+          "label": "Build a small skill with a simple plan",
+          "weights": {
+            "Growth": 2
+          }
+        },
+        {
+          "label": "Volunteer or help someone directly",
+          "weights": {
+            "Contribution": 2,
+            "Connection": 1
+          }
+        },
+        {
+          "label": "Curate a playlist, reading list, or mood board that reflects me",
+          "weights": {
+            "Identity": 2
+          }
+        },
+        {
+          "label": "Plan a micro-adventure in my city",
+          "weights": {
+            "Adventure": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "q10",
+      "text": "How adventurous do you feel right now?",
+      "choices": [
+        {
+          "label": "Very: I want to try bold or new experiences",
+          "weights": {
+            "Adventure": 2
+          }
+        },
+        {
+          "label": "Moderately: I can stretch a little",
+          "weights": {
+            "Adventure": 1,
             "Growth": 1
           }
         },
         {
-          "label": "Creative hobbies (music, art, gardening)",
+          "label": "Not much: I prefer predictable comfort",
           "weights": {
-            "Identity": 1,
-            "Peace": 1
+            "Peace": 2
           }
         },
         {
-          "label": "Being in nature",
+          "label": "It depends: with support, I can try something small",
           "weights": {
-            "Peace": 2,
+            "Connection": 1,
             "Adventure": 1
           }
         }
       ]
     },
     {
-      "id": "Q3",
-      "section": "Who Am I Now?",
-      "text": "What part of myself have I neglected that wants to come forward?",
+      "id": "q11",
+      "text": "Which gives you the strongest sense of meaning right now?",
       "choices": [
         {
-          "label": "My creative side",
+          "label": "Helping others or contributing to a cause",
+          "weights": {
+            "Contribution": 2
+          }
+        },
+        {
+          "label": "Deepening bonds with people close to me",
+          "weights": {
+            "Connection": 2
+          }
+        },
+        {
+          "label": "Becoming the person I want to be",
           "weights": {
             "Identity": 2
           }
         },
         {
-          "label": "My learner/curious side",
+          "label": "Growing skills I am proud of",
           "weights": {
             "Growth": 2
-          }
-        },
-        {
-          "label": "My social side",
-          "weights": {
-            "Connection": 2
-          }
-        },
-        {
-          "label": "My need for rest and balance",
-          "weights": {
-            "Peace": 2
-          }
-        },
-        {
-          "label": "My adventurous spirit",
-          "weights": {
-            "Adventure": 2
-          }
-        },
-        {
-          "label": "My desire to contribute",
-          "weights": {
-            "Contribution": 2
           }
         }
       ]
     },
     {
-      "id": "Q4",
-      "section": "The Life I Want to Create",
-      "text": "What kind of days make me feel most alive?",
+      "id": "q12",
+      "text": "How do you prefer to learn at the moment?",
       "choices": [
         {
-          "label": "Days with meaningful conversations",
-          "weights": {
-            "Connection": 2
-          }
-        },
-        {
-          "label": "Days with time to learn/build something",
+          "label": "Self-guided reading or online courses",
           "weights": {
             "Growth": 2
           }
         },
         {
-          "label": "Days that are calm and unhurried",
-          "weights": {
-            "Peace": 2
-          }
-        },
-        {
-          "label": "Days exploring new places or activities",
-          "weights": {
-            "Adventure": 2
-          }
-        },
-        {
-          "label": "Days spent on a passion project",
-          "weights": {
-            "Identity": 2
-          }
-        },
-        {
-          "label": "Days where I help or mentor someone",
-          "weights": {
-            "Contribution": 2
-          }
-        }
-      ]
-    },
-    {
-      "id": "Q5",
-      "section": "The Life I Want to Create",
-      "text": "What does freedom look like to me now?",
-      "choices": [
-        {
-          "label": "Being myself without needing to prove anything",
-          "weights": {
-            "Identity": 2,
-            "Peace": 1
-          }
-        },
-        {
-          "label": "Time freedom to learn and grow",
-          "weights": {
-            "Growth": 2
-          }
-        },
-        {
-          "label": "Fewer obligations, more space for what matters",
-          "weights": {
-            "Peace": 2
-          }
-        },
-        {
-          "label": "Spontaneous travel and experiences",
-          "weights": {
-            "Adventure": 2
-          }
-        },
-        {
-          "label": "Choosing people and communities that energize me",
-          "weights": {
-            "Connection": 2
-          }
-        },
-        {
-          "label": "Using my time to make a difference",
-          "weights": {
-            "Contribution": 2
-          }
-        }
-      ]
-    },
-    {
-      "id": "Q6",
-      "section": "The Life I Want to Create",
-      "text": "What hobbies or interests have I always wanted to explore?",
-      "choices": [
-        {
-          "label": "Creative arts (painting, writing, music)",
-          "weights": {
-            "Identity": 2
-          }
-        },
-        {
-          "label": "Learning new skills or topics",
-          "weights": {
-            "Growth": 2
-          }
-        },
-        {
-          "label": "Clubs, groups, or social activities",
-          "weights": {
-            "Connection": 2
-          }
-        },
-        {
-          "label": "Mindfulness, yoga, or wellness",
-          "weights": {
-            "Peace": 2
-          }
-        },
-        {
-          "label": "Outdoor adventures",
-          "weights": {
-            "Adventure": 2
-          }
-        },
-        {
-          "label": "Volunteering or mentoring",
-          "weights": {
-            "Contribution": 2
-          }
-        }
-      ]
-    },
-    {
-      "id": "Q7",
-      "section": "Letting Go & Moving Forward",
-      "text": "What am I holding on to that no longer serves me?",
-      "choices": [
-        {
-          "label": "Old labels or expectations about who I must be",
-          "weights": {
-            "Identity": 2
-          }
-        },
-        {
-          "label": "Perfectionism around learning/doing it 'right'",
-          "weights": {
-            "Growth": 2
-          }
-        },
-        {
-          "label": "Relationships that drain my energy",
-          "weights": {
-            "Connection": 2
-          }
-        },
-        {
-          "label": "Constant busyness or over-commitment",
-          "weights": {
-            "Peace": 2
-          }
-        },
-        {
-          "label": "Fear of new experiences",
-          "weights": {
-            "Adventure": 2
-          }
-        },
-        {
-          "label": "Guilt about not giving enough",
-          "weights": {
-            "Contribution": 2
-          }
-        }
-      ]
-    },
-    {
-      "id": "Q8",
-      "section": "Letting Go & Moving Forward",
-      "text": "What fears have been quietly running the show?",
-      "choices": [
-        {
-          "label": "Losing my sense of self",
-          "weights": {
-            "Identity": 2
-          }
-        },
-        {
-          "label": "Falling behind or being 'not good enough'",
-          "weights": {
-            "Growth": 2
-          }
-        },
-        {
-          "label": "Being alone or misunderstood",
-          "weights": {
-            "Connection": 2
-          }
-        },
-        {
-          "label": "Never finding real calm or balance",
-          "weights": {
-            "Peace": 2
-          }
-        },
-        {
-          "label": "Missing out on life’s adventures",
-          "weights": {
-            "Adventure": 2
-          }
-        },
-        {
-          "label": "Not making a meaningful impact",
-          "weights": {
-            "Contribution": 2
-          }
-        }
-      ]
-    },
-    {
-      "id": "Q9",
-      "section": "Letting Go & Moving Forward",
-      "text": "What boundaries will protect my peace going forward?",
-      "choices": [
-        {
-          "label": "Saying no to roles that don't fit who I am",
-          "weights": {
-            "Identity": 2,
-            "Peace": 1
-          }
-        },
-        {
-          "label": "Time blocks for learning and growth",
-          "weights": {
-            "Growth": 2
-          }
-        },
-        {
-          "label": "Limiting time with draining people",
+          "label": "Learning with others or a mentor",
           "weights": {
             "Connection": 2,
-            "Peace": 1
+            "Growth": 1
           }
         },
         {
-          "label": "Non-negotiable rest/quiet time",
+          "label": "Hands-on experiments and field trips",
           "weights": {
-            "Peace": 2
+            "Adventure": 2,
+            "Growth": 1
           }
         },
         {
-          "label": "Planning restorative adventures",
+          "label": "Gentle, reflective journaling or walks",
           "weights": {
-            "Adventure": 2
-          }
-        },
-        {
-          "label": "Dedicating time to give back, sustainably",
-          "weights": {
-            "Contribution": 2
+            "Peace": 2,
+            "Growth": 1
           }
         }
       ]
     },
     {
-      "id": "Q10",
-      "section": "Celebrating My Past Self",
-      "text": "What is something I’ve done that I’m deeply proud of?",
+      "id": "q13",
+      "text": "Which morning routine would help most right now?",
       "choices": [
         {
-          "label": "Becoming who I am despite obstacles",
-          "weights": {
-            "Identity": 2
-          }
-        },
-        {
-          "label": "Learning, mastering, or teaching a skill",
-          "weights": {
-            "Growth": 2
-          }
-        },
-        {
-          "label": "Building and sustaining relationships",
-          "weights": {
-            "Connection": 2
-          }
-        },
-        {
-          "label": "Maintaining balance through challenges",
+          "label": "A calm start: hydrate, stretch, and a quiet moment",
           "weights": {
             "Peace": 2
           }
         },
         {
-          "label": "Braving big changes or adventures",
+          "label": "A focused start: plan priorities and one key task",
           "weights": {
-            "Adventure": 2
+            "Growth": 2
           }
         },
         {
-          "label": "Serving others or creating positive impact",
+          "label": "An expressive start: write or create something small",
           "weights": {
-            "Contribution": 2
+            "Identity": 2
+          }
+        },
+        {
+          "label": "An energizing start: get outside for 10 minutes",
+          "weights": {
+            "Adventure": 2
           }
         }
       ]
     },
     {
-      "id": "Q11",
-      "section": "Celebrating My Past Self",
-      "text": "What experiences taught me the most about resilience?",
+      "id": "q14",
+      "text": "Which boundary would make the biggest difference this week?",
       "choices": [
         {
-          "label": "Redefining myself after setbacks",
-          "weights": {
-            "Identity": 2
-          }
-        },
-        {
-          "label": "Learning from failures and trying again",
-          "weights": {
-            "Growth": 2
-          }
-        },
-        {
-          "label": "Leaning on community during hard times",
-          "weights": {
-            "Connection": 2
-          }
-        },
-        {
-          "label": "Finding calm in the storm",
+          "label": "Protect time for rest or hobbies",
           "weights": {
             "Peace": 2
           }
         },
         {
-          "label": "Taking risks that stretched me",
+          "label": "Say no to what is not aligned with my values",
           "weights": {
-            "Adventure": 2
+            "Identity": 2
           }
         },
         {
-          "label": "Showing up for others when it was hard",
+          "label": "Limit distractions when with people I care about",
           "weights": {
-            "Contribution": 2
+            "Connection": 2
+          }
+        },
+        {
+          "label": "Create a focused block to progress one goal",
+          "weights": {
+            "Growth": 2
           }
         }
       ]
     },
     {
-      "id": "Q12",
-      "section": "Celebrating My Past Self",
-      "text": "What parts of me have remained strong and steady through it all?",
+      "id": "q15",
+      "text": "Where do you most want to contribute beyond yourself?",
       "choices": [
         {
-          "label": "A grounded sense of who I am",
+          "label": "Support a community or local cause",
           "weights": {
-            "Identity": 2
+            "Contribution": 2,
+            "Connection": 1
           }
         },
         {
-          "label": "A love for learning and growth",
+          "label": "Share knowledge or mentor someone",
           "weights": {
-            "Growth": 2
+            "Contribution": 2,
+            "Growth": 1
           }
         },
         {
-          "label": "Kindness and connection with others",
+          "label": "Use my strengths in a way that feels true to me",
           "weights": {
-            "Connection": 2
+            "Identity": 2,
+            "Contribution": 1
           }
         },
         {
-          "label": "Calm, presence, and perspective",
+          "label": "Join an adventure with a purpose (cleanup, fundraiser, etc.)",
           "weights": {
-            "Peace": 2
-          }
-        },
-        {
-          "label": "Curiosity and courage to explore",
-          "weights": {
-            "Adventure": 2
-          }
-        },
-        {
-          "label": "A heart for contribution",
-          "weights": {
-            "Contribution": 2
-          }
-        }
-      ]
-    },
-    {
-      "id": "Q13",
-      "section": "Moments That Changed Me",
-      "text": "What was a turning point in my life, and what did I learn from it?",
-      "choices": [
-        {
-          "label": "I redefined who I am",
-          "weights": {
-            "Identity": 2
-          }
-        },
-        {
-          "label": "I discovered a new path through learning",
-          "weights": {
-            "Growth": 2
-          }
-        },
-        {
-          "label": "I found the right people and support",
-          "weights": {
-            "Connection": 2
-          }
-        },
-        {
-          "label": "I learned to slow down and breathe",
-          "weights": {
-            "Peace": 2
-          }
-        },
-        {
-          "label": "I embraced a bold new experience",
-          "weights": {
-            "Adventure": 2
-          }
-        },
-        {
-          "label": "I realized I want to give more",
-          "weights": {
-            "Contribution": 2
-          }
-        }
-      ]
-    },
-    {
-      "id": "Q14",
-      "section": "Moments That Changed Me",
-      "text": "When did I surprise myself with strength or courage?",
-      "choices": [
-        {
-          "label": "Standing firm in who I am",
-          "weights": {
-            "Identity": 2
-          }
-        },
-        {
-          "label": "Persisting through a steep learning curve",
-          "weights": {
-            "Growth": 2
-          }
-        },
-        {
-          "label": "Being vulnerable with others",
-          "weights": {
-            "Connection": 2
-          }
-        },
-        {
-          "label": "Choosing rest over hustle",
-          "weights": {
-            "Peace": 2
-          }
-        },
-        {
-          "label": "Saying yes to an adventure",
-          "weights": {
-            "Adventure": 2
-          }
-        },
-        {
-          "label": "Serving when it wasn’t easy",
-          "weights": {
-            "Contribution": 2
-          }
-        }
-      ]
-    },
-    {
-      "id": "Q15",
-      "section": "Moments That Changed Me",
-      "text": "What event shifted my priorities forever?",
-      "choices": [
-        {
-          "label": "Reframing my identity",
-          "weights": {
-            "Identity": 2
-          }
-        },
-        {
-          "label": "Realizing learning matters more than status",
-          "weights": {
-            "Growth": 2
-          }
-        },
-        {
-          "label": "Understanding who my people really are",
-          "weights": {
-            "Connection": 2
-          }
-        },
-        {
-          "label": "Discovering the value of inner peace",
-          "weights": {
-            "Peace": 2
-          }
-        },
-        {
-          "label": "Choosing a path of exploration",
-          "weights": {
-            "Adventure": 2
-          }
-        },
-        {
-          "label": "Committing to contribute in a bigger way",
-          "weights": {
-            "Contribution": 2
+            "Adventure": 2,
+            "Contribution": 1
           }
         }
       ]
