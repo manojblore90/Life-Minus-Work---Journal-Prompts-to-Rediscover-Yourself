@@ -1,3 +1,4 @@
+
 import os
 import sys
 import json
@@ -26,7 +27,7 @@ try:
 except Exception as e:
     st.sidebar.error(f"Dir list error: {e}")
 
-def load_questions(filename="questions.json"):
+def load_questions(filename: str = "questions.json"):
     base_dir = Path(__file__).parent
     path = base_dir / filename
     if not path.exists():
@@ -41,14 +42,12 @@ def safe_text(s: str) -> str:
     if s is None:
         return ""
     s = str(s)
-    # Keep common punctuation by mapping to ASCII
-    s = (s.replace("\u2019", "'")  # right single quote
-           .replace("\u2018", "'")  # left single quote
-           .replace("\u201c", '"')  # left double quote
-           .replace("\u201d", '"')  # right double quote
-           .replace("\u2013", "-")  # en dash
-           .replace("\u2014", "-")) # em dash
-    # Normalize and strip any remaining unsupported chars
+    s = (s.replace("\u2019", "'")    # right single quote
+           .replace("\u2018", "'")   # left single quote
+           .replace("\u201c", '"')   # left double quote
+           .replace("\u201d", '"')   # right double quote
+           .replace("\u2013", "-")   # en dash
+           .replace("\u2014", "-"))  # em dash
     s = unicodedata.normalize("NFKD", s).encode("latin-1", "ignore").decode("latin-1")
     return s
 
@@ -61,7 +60,7 @@ if USE_AI:
     except Exception:
         USE_AI = False
 
-def compute_scores(answers, questions):
+def compute_scores(answers: dict, questions: list) -> dict:
     scores = {t: 0 for t in THEMES}
     for q in questions:
         qid = q["id"]
@@ -70,16 +69,16 @@ def compute_scores(answers, questions):
             continue
         try:
             choice = q["choices"][choice_idx]
-        except IndexError:
+        except (IndexError, KeyError, TypeError):
             continue
         for theme, val in choice.get("weights", {}).items():
             scores[theme] = scores.get(theme, 0) + val
     return scores
 
-def top_themes(scores, k=3):
+def top_themes(scores: dict, k: int = 3) -> list:
     return [name for name, _ in sorted(scores.items(), key=lambda x: x[1], reverse=True)[:k]]
 
-def ai_paragraph(prompt):
+def ai_paragraph(prompt: str) -> str | None:
     if not USE_AI:
         return None
     try:
@@ -96,7 +95,7 @@ def ai_paragraph(prompt):
     except Exception:
         return None
 
-def generate_report_text(email, scores, top3):
+def generate_report_text(email: str, scores: dict, top3: list) -> str:
     base_copy = [
         "Thank you for completing the Reflection Quiz. Below are your top themes and next-step ideas tailored for you.",
         *[f"- {theme}: Consider one simple action this week to build momentum in this area." for theme in top3],
@@ -119,7 +118,7 @@ def generate_report_text(email, scores, top3):
             return ai_text
     return fallback
 
-def make_pdf_bytes(name_email, scores, top3, narrative):
+def make_pdf_bytes(name_email: str, scores: dict, top3: list, narrative: str) -> bytes:
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
@@ -155,7 +154,6 @@ def make_pdf_bytes(name_email, scores, top3, narrative):
     pdf.set_font("Arial", "I", 10)
     pdf.multi_cell(0, 6, safe_text("Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice."))
 
-    # Return bytes for Streamlit download
     return pdf.output(dest="S").encode("latin-1")
 
 st.divider()
@@ -190,18 +188,22 @@ if st.session_state.get('submitted_once'):
         st.divider()
 
     st.subheader("Step 3: Get your report")
-    if len(answers) < len(questions]):
+    if len(answers) < len(questions):
         st.info(f"Answered {len(answers)} of {len(questions)} questions. Keep going!")
     else:
         if st.button("Finish and Generate My Report"):
             scores = compute_scores(answers, questions)
             top3 = top_themes(scores, 3)
-            narrative = generate_report_text(st.session_state.get('email',''), scores, top3)
-            pdf_bytes = make_pdf_bytes(st.session_state.get('email',''), scores, top3, narrative)
+            narrative = generate_report_text(st.session_state.get('email', ''), scores, top3)
+            pdf_bytes = make_pdf_bytes(st.session_state.get('email', ''), scores, top3, narrative)
 
             st.success("Your personalized report is ready!")
-            st.download_button("Download Your PDF Report", data=pdf_bytes,
-                               file_name="LifeMinusWork_Reflection_Report.pdf", mime="application/pdf")
+            st.download_button(
+                "Download Your PDF Report",
+                data=pdf_bytes,
+                file_name="LifeMinusWork_Reflection_Report.pdf",
+                mime="application/pdf",
+            )
 
             # Save to /tmp (Cloud-safe, ephemeral)
             try:
@@ -213,7 +215,7 @@ if st.session_state.get('submitted_once'):
                     writer = csv.writer(f)
                     if not file_exists:
                         writer.writerow(["timestamp", "email", "scores", "top3"])
-                    writer.writerow([ts, st.session_state.get('email',''), json.dumps(scores), json.dumps(top3)])
+                    writer.writerow([ts, st.session_state.get('email', ''), json.dumps(scores), json.dumps(top3)])
                 st.caption("Saved to /tmp/responses.csv (Cloud-safe, ephemeral).")
             except Exception as e:
                 st.caption(f"Could not save responses (demo only). {e}")
