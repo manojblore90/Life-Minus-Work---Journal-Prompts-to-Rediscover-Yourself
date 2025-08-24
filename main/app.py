@@ -63,32 +63,22 @@ def get_logo_png_path() -> Optional[str]:
                     return None
     return None
 
-# ---------- Fonts (optional Unicode via TTF) ----------
-def try_add_unicode_font(pdf: FPDF) -> bool:
-    """If main/fonts/DejaVuSans.ttf exists, register it and use it for full Unicode."""
-    here = Path(__file__).parent
-    font_path = here / "fonts" / "DejaVuSans.ttf"
-    if font_path.exists():
-        try:
-            pdf.add_font("DejaVu", "", str(font_path), uni=True)
-            pdf.add_font("DejaVu", "B", str(font_path), uni=True)
-            pdf.add_font("DejaVu", "I", str(font_path), uni=True)
-            return True
-        except Exception:
-            return False
-    return False
-
-# ---------- PDF text safety (fallback for core fonts) ----------
+# ---------- PDF text safety (force Latin-1 safe text for classic fpdf) ----------
 def safe_text(s: str) -> str:
     if s is None:
         return ""
     s = str(s)
-    s = (s.replace("\u2019", "'")   # ’
-           .replace("\u2018", "'")  # ‘
-           .replace("\u201c", '"') # “
-           .replace("\u201d", '"') # ”
-           .replace("\u2013", "-")  # –
-           .replace("\u2014", "-")) # —
+    # common curly punctuation to ASCII
+    s = (s.replace("’", "'")
+           .replace("‘", "'")
+           .replace("“", '"')
+           .replace("”", '"')
+           .replace("–", "-")
+           .replace("—", "-")
+           .replace("…", "...")
+           .replace("•", "*")
+           .replace("–", "-"))
+    # normalize and strip non latin-1
     s = unicodedata.normalize("NFKD", s).encode("latin-1", "ignore").decode("latin-1")
     return s
 
@@ -96,15 +86,9 @@ def safe_text(s: str) -> str:
 USE_AI = bool(os.getenv("OPENAI_API_KEY"))
 
 def pick_model(total_free_chars: int, depth_mode: str, base_model: str = DEFAULT_MODEL) -> str:
-    """Upgrade to gpt-5-mini when there's lots of free text or user picks 'High' depth.
-    If the env model is already higher-end (e.g., gpt-5 or gpt-5-mini), keep it.
-    If env model is 4-series (e.g., gpt-4o-mini), still allow upgrade to 5-mini when needed.
-    """
     lower = (base_model or "").lower()
-    # If user already forced a bigger model, respect it
-    if any(tag in lower for tag in ["gpt-5-mini", "gpt-5 " , "gpt-5\n"]):
+    if any(tag in lower for tag in ["gpt-5-mini", "gpt-5 "]):
         return base_model
-    # Router: lots of text OR depth=High -> upgrade
     if total_free_chars > 500 or depth_mode == "High":
         return "gpt-5-mini"
     return base_model or "gpt-5-nano"
@@ -117,7 +101,6 @@ def ai_sections_and_weights(
     horizon_weeks: int = 4,
     depth_mode: str = "Standard",
 ) -> Optional[dict]:
-    """Deep read + weights for free-text answers, plus a Future Snapshot."""
     if not USE_AI:
         return None
     try:
@@ -257,11 +240,11 @@ def balancing_suggestion(theme: str) -> str:
     }
     return suggestions.get(theme, "Take one small, visible step this week.")
 
-# ---------- Pretty PDF ----------
-def draw_scores_barchart(pdf: FPDF, scores: Dict[str, int], use_unicode: bool):
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 14)
-    pdf.cell(0, 8, ("Your Theme Snapshot"), ln=True)
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12)
+# ---------- Pretty PDF (always safe_text) ----------
+def draw_scores_barchart(pdf: FPDF, scores: Dict[str, int]):
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 8, safe_text("Your Theme Snapshot"), ln=True)
+    pdf.set_font("Arial", "", 12)
     max_score = max(max(scores.values()), 1)
     bar_w_max = 120
     x_left = pdf.get_x() + 10
@@ -270,51 +253,50 @@ def draw_scores_barchart(pdf: FPDF, scores: Dict[str, int], use_unicode: bool):
         val = scores.get(theme, 0)
         bar_w = (val / max_score) * bar_w_max
         pdf.set_xy(x_left, y)
-        pdf.cell(35, 6, theme if use_unicode else theme)
+        pdf.cell(35, 6, safe_text(theme))
         pdf.set_fill_color(30, 144, 255)
         pdf.rect(x_left + 38, y + 1.3, bar_w, 4.5, "F")
         pdf.set_xy(x_left + 38 + bar_w + 2, y)
-        pdf.cell(0, 6, str(val))
+        pdf.cell(0, 6, safe_text(str(val)))
         y += 7
     pdf.set_y(y + 4)
 
-def paragraph(pdf: FPDF, title: str, body: str, use_unicode: bool):
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 14)
-    pdf.cell(0, 8, (title), ln=True)
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12)
-    text = body if use_unicode else safe_text(body)
-    for line in text.split("\n"):
+def paragraph(pdf: FPDF, title: str, body: str):
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 8, safe_text(title), ln=True)
+    pdf.set_font("Arial", "", 12)
+    for line in safe_text(body).split("\n"):
         pdf.multi_cell(0, 6, line)
     pdf.ln(2)
 
-def bullets(pdf: FPDF, title: str, items: List[str], use_unicode: bool):
+def bullets(pdf: FPDF, title: str, items: List[str]):
     if not items: return
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 14)
-    pdf.cell(0, 8, (title), ln=True)
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12)
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 8, safe_text(title), ln=True)
+    pdf.set_font("Arial", "", 12)
     for it in items:
         pdf.cell(4, 6, "*")
-        pdf.multi_cell(0, 6, it if use_unicode else safe_text(it))
+        pdf.multi_cell(0, 6, safe_text(it))
     pdf.ln(1)
 
-def checkbox_line(pdf: FPDF, text: str, use_unicode: bool):
+def checkbox_line(pdf: FPDF, text: str):
     x = pdf.get_x()
     y = pdf.get_y()
-    pdf.rect(x, y + 1.5, 4, 4)  # little square
+    pdf.rect(x, y + 1.5, 4, 4)
     pdf.set_x(x + 6)
-    pdf.multi_cell(0, 6, text if use_unicode else safe_text(text))
+    pdf.multi_cell(0, 6, safe_text(text))
 
-def label_value(pdf: FPDF, label: str, value: str, use_unicode: bool):
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 12); pdf.cell(0, 6, (label), ln=True)
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12);  pdf.multi_cell(0, 6, value if use_unicode else safe_text(value))
+def label_value(pdf: FPDF, label: str, value: str):
+    pdf.set_font("Arial", "B", 12); pdf.cell(0, 6, safe_text(label), ln=True)
+    pdf.set_font("Arial", "", 12);  pdf.multi_cell(0, 6, safe_text(value))
 
-def future_callout(pdf: FPDF, weeks: int, text: str, use_unicode: bool):
+def future_callout(pdf: FPDF, weeks: int, text: str):
     pdf.set_text_color(30, 60, 120)
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 14)
-    pdf.cell(0, 8, f"Future Snapshot — {weeks} weeks", ln=True)
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 8, safe_text(f"Future Snapshot — {weeks} weeks"), ln=True)
     pdf.set_text_color(0, 0, 0)
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "I", 12)
-    pdf.multi_cell(0, 6, text if use_unicode else safe_text(text))
+    pdf.set_font("Arial", "I", 12)
+    pdf.multi_cell(0, 6, safe_text(text))
     pdf.ln(2)
 
 def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: List[str],
@@ -322,8 +304,6 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-
-    use_unicode = try_add_unicode_font(pdf)
 
     # Logo (optional)
     if logo_path:
@@ -333,151 +313,151 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
             pass
 
     # Title block
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 18)
-    pdf.cell(0, 10, (REPORT_TITLE), ln=True)
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12)
+    pdf.set_font("Arial", "B", 18)
+    pdf.cell(0, 10, safe_text(REPORT_TITLE), ln=True)
+    pdf.set_font("Arial", "", 12)
     today = datetime.date.today().strftime("%d %b %Y")
     greet = f"Hi {first_name}," if first_name else "Hello,"
-    pdf.cell(0, 8, (greet if use_unicode else safe_text(greet)), ln=True)
-    pdf.cell(0, 8, (f"Date: {today}"), ln=True)
+    pdf.cell(0, 8, safe_text(greet), ln=True)
+    pdf.cell(0, 8, safe_text(f"Date: {today}"), ln=True)
     if email:
-        pdf.cell(0, 8, (f"Email: {email}"), ln=True)
+        pdf.cell(0, 8, safe_text(f"Email: {email}"), ln=True)
     pdf.ln(1)
 
     # Archetype/core & signature
     if sections.get("archetype") or sections.get("core_need"):
-        label_value(pdf, "Archetype", sections.get("archetype","") or "—", use_unicode)
-        label_value(pdf, "Core Need", sections.get("core_need","") or "—", use_unicode)
+        label_value(pdf, "Archetype", sections.get("archetype","") or "—")
+        label_value(pdf, "Core Need", sections.get("core_need","") or "—")
         if sections.get("signature_metaphor"):
-            label_value(pdf, "Signature Metaphor", sections.get("signature_metaphor",""), use_unicode)
+            label_value(pdf, "Signature Metaphor", sections.get("signature_metaphor",""))
         if sections.get("signature_sentence"):
-            label_value(pdf, "Signature Sentence", sections.get("signature_sentence",""), use_unicode)
+            label_value(pdf, "Signature Sentence", sections.get("signature_sentence",""))
         pdf.ln(1)
 
     # Top themes
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 14); pdf.cell(0, 8, ("Top Themes"), ln=True)
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12);  pdf.multi_cell(0, 6, (", ".join(top3) if use_unicode else safe_text(", ".join(top3)))); pdf.ln(1)
+    pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, safe_text("Top Themes"), ln=True)
+    pdf.set_font("Arial", "", 12);  pdf.multi_cell(0, 6, safe_text(", ".join(top3))); pdf.ln(1)
 
     # Score bars
-    draw_scores_barchart(pdf, scores, use_unicode)
+    draw_scores_barchart(pdf, scores)
 
     # Insight blocks
     if sections.get("deep_insight"):
-        paragraph(pdf, "What this really says about you", sections["deep_insight"], use_unicode)
+        paragraph(pdf, "What this really says about you", sections["deep_insight"])
 
     if sections.get("why_now"):
-        label_value(pdf, "Why this matters now", sections["why_now"], use_unicode); pdf.ln(1)
+        label_value(pdf, "Why this matters now", sections["why_now"]); pdf.ln(1)
 
     # Future Snapshot callout
     if sections.get("future_snapshot"):
-        future_callout(pdf, sections.get("horizon_weeks", 4), sections["future_snapshot"], use_unicode)
+        future_callout(pdf, sections.get("horizon_weeks", 4), sections["future_snapshot"])
 
     # Strengths / Energizers / Drainers
     if sections.get("strengths"):
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 14); pdf.cell(0, 8, "Signature strengths", ln=True)
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12)
+        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Signature strengths", ln=True)
+        pdf.set_font("Arial", "", 12)
         for s in sections["strengths"]:
-            pdf.cell(4, 6, "*"); pdf.multi_cell(0, 6, (s if use_unicode else safe_text(s)))
+            pdf.cell(4, 6, "*"); pdf.multi_cell(0, 6, safe_text(s))
         pdf.ln(1)
 
     if sections.get("energizers") or sections.get("drainers"):
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 14); pdf.cell(0, 8, "Energy map", ln=True)
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 12); pdf.cell(0, 6, "Energizers", ln=True)
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12)
+        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Energy map", ln=True)
+        pdf.set_font("Arial", "B", 12); pdf.cell(0, 6, "Energizers", ln=True)
+        pdf.set_font("Arial", "", 12)
         for e in sections.get("energizers", []):
-            pdf.cell(4, 6, "+"); pdf.multi_cell(0, 6, (e if use_unicode else safe_text(e)))
+            pdf.cell(4, 6, "+"); pdf.multi_cell(0, 6, safe_text(e))
         pdf.ln(1)
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 12); pdf.cell(0, 6, "Drainers", ln=True)
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12)
+        pdf.set_font("Arial", "B", 12); pdf.cell(0, 6, "Drainers", ln=True)
+        pdf.set_font("Arial", "", 12)
         for d in sections.get("drainers", []):
-            pdf.cell(4, 6, "–"); pdf.multi_cell(0, 6, (d if use_unicode else safe_text(d)))
+            pdf.cell(4, 6, "-"); pdf.multi_cell(0, 6, safe_text(d))
         pdf.ln(1)
 
     # Tensions & blindspot
     if sections.get("tensions"):
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 14); pdf.cell(0, 8, "Hidden tensions", ln=True)
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12)
+        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Hidden tensions", ln=True)
+        pdf.set_font("Arial", "", 12)
         for t in sections["tensions"]:
-            pdf.cell(4, 6, "*"); pdf.multi_cell(0, 6, (t if use_unicode else safe_text(t)))
+            pdf.cell(4, 6, "*"); pdf.multi_cell(0, 6, safe_text(t))
         pdf.ln(1)
     if sections.get("blindspot"):
-        label_value(pdf, "Watch-out (gentle blind spot)", sections["blindspot"], use_unicode); pdf.ln(1)
+        label_value(pdf, "Watch-out (gentle blind spot)", sections["blindspot"]); pdf.ln(1)
 
     # Actions & If–Then plans
     if sections.get("actions"):
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 14); pdf.cell(0, 8, "3 next-step actions (7 days)", ln=True)
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12)
+        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "3 next-step actions (7 days)", ln=True)
+        pdf.set_font("Arial", "", 12)
         for a in sections["actions"]:
-            checkbox_line(pdf, a, use_unicode)
+            checkbox_line(pdf, a)
         pdf.ln(1)
 
     if sections.get("if_then"):
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 14); pdf.cell(0, 8, "Implementation intentions (If–Then)", ln=True)
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12)
+        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Implementation intentions (If–Then)", ln=True)
+        pdf.set_font("Arial", "", 12)
         for it in sections["if_then"]:
-            pdf.cell(4, 6, "*"); pdf.multi_cell(0, 6, (it if use_unicode else safe_text(it)))
+            pdf.cell(4, 6, "*"); pdf.multi_cell(0, 6, safe_text(it))
         pdf.ln(1)
 
     # Weekly plan
     if sections.get("weekly_plan"):
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 14); pdf.cell(0, 8, "1-week gentle plan", ln=True)
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12)
+        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "1-week gentle plan", ln=True)
+        pdf.set_font("Arial", "", 12)
         for i, item in enumerate(sections["weekly_plan"][:7]):
-            pdf.cell(0, 6, (f"Day {i+1}: {item}" if use_unicode else safe_text(f"Day {i+1}: {item}")), ln=True)
+            pdf.cell(0, 6, safe_text(f"Day {i+1}: {item}"), ln=True)
         pdf.ln(1)
 
     # Balancing Opportunity (lowest 1–2 themes)
     lows = [name for name, _ in sorted(scores.items(), key=lambda x: x[1])[:2]]
     if lows:
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 14); pdf.cell(0, 8, "Balancing Opportunity", ln=True)
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12)
+        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Balancing Opportunity", ln=True)
+        pdf.set_font("Arial", "", 12)
         for theme in lows:
             tip = balancing_suggestion(theme)
-            pdf.multi_cell(0, 6, (f"{theme}: {tip}" if use_unicode else safe_text(f"{theme}: {tip}")))
+            pdf.multi_cell(0, 6, safe_text(f"{theme}: {tip}"))
         pdf.ln(1)
 
     # Boosters & Pitfalls (for top themes)
     if sections.get("top_theme_boosters") or sections.get("pitfalls"):
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 14); pdf.cell(0, 8, "Amplify what works / Avoid what trips you", ln=True)
+        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Amplify what works / Avoid what trips you", ln=True)
         if sections.get("top_theme_boosters"):
-            pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 12); pdf.cell(0, 6, "Boosters", ln=True)
-            pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12)
+            pdf.set_font("Arial", "B", 12); pdf.cell(0, 6, "Boosters", ln=True)
+            pdf.set_font("Arial", "", 12)
             for b in sections.get("top_theme_boosters", []):
-                pdf.cell(4, 6, "*"); pdf.multi_cell(0, 6, (b if use_unicode else safe_text(b)))
+                pdf.cell(4, 6, "*"); pdf.multi_cell(0, 6, safe_text(b))
         if sections.get("pitfalls"):
-            pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 12); pdf.cell(0, 6, "Pitfalls", ln=True)
-            pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12)
+            pdf.set_font("Arial", "B", 12); pdf.cell(0, 6, "Pitfalls", ln=True)
+            pdf.set_font("Arial", "", 12)
             for p in sections.get("pitfalls", []):
-                pdf.cell(4, 6, "–"); pdf.multi_cell(0, 6, (p if use_unicode else safe_text(p)))
+                pdf.cell(4, 6, "-"); pdf.multi_cell(0, 6, safe_text(p))
         pdf.ln(1)
 
     # Quote & affirmation
     if sections.get("affirmation") or sections.get("quote"):
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 12); pdf.cell(0, 6, "Keep this in view", ln=True)
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "I", 11)
+        pdf.set_font("Arial", "B", 12); pdf.cell(0, 6, "Keep this in view", ln=True)
+        pdf.set_font("Arial", "I", 11)
         if sections.get("affirmation"):
-            pdf.multi_cell(0, 6, (f"Affirmation: {sections['affirmation']}" if use_unicode else safe_text(f"Affirmation: {sections['affirmation']}")))
+            pdf.multi_cell(0, 6, safe_text(f"Affirmation: {sections['affirmation']}"))
         if sections.get("quote"):
-            qtext = f"“{sections['quote']}”" if use_unicode else f"\u201c{sections['quote']}\u201d"
-            pdf.multi_cell(0, 6, (qtext if use_unicode else safe_text(qtext)))
+            qtext = f'"{sections["quote"]}"'
+            pdf.multi_cell(0, 6, safe_text(qtext))
         pdf.ln(2)
 
     # Your reflections (free text)
     if free_responses:
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 14); pdf.cell(0, 8, "Your words we heard", ln=True)
-        pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12)
+        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Your words we heard", ln=True)
+        pdf.set_font("Arial", "", 12)
         for fr in free_responses:
             if not fr.get("answer"): continue
-            pdf.multi_cell(0, 6, (f"• {fr['question']}" if use_unicode else safe_text(f"• {fr['question']}")))
-            pdf.multi_cell(0, 6, (f"  {fr['answer']}" if use_unicode else safe_text(f"  {fr['answer']}")))
+            pdf.multi_cell(0, 6, safe_text(f"• {fr['question']}"))
+            pdf.multi_cell(0, 6, safe_text(f"  {fr['answer']}"))
             pdf.ln(1)
 
     # New page: Signature Week (at a glance)
     pdf.add_page()
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 16)
-    pdf.cell(0, 10, ("Signature Week — At a glance"), ln=True)
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12)
-    pdf.multi_cell(0, 6, ("A simple plan you can print or screenshot. Check items off as you go." if use_unicode else safe_text("A simple plan you can print or screenshot. Check items off as you go.")))
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 10, safe_text("Signature Week — At a glance"), ln=True)
+    pdf.set_font("Arial", "", 12)
+    pdf.multi_cell(0, 6, safe_text("A simple plan you can print or screenshot. Check items off as you go."))
     pdf.ln(2)
 
     # Draw a simple 7-row checklist table for the weekly_plan (or fall back)
@@ -486,24 +466,24 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         week_items = [f"Do one small action for {t}" for t in top3] + ["Reflect and set next step"]
 
     for i, item in enumerate(week_items[:7]):
-        checkbox_line(pdf, f"Day {i+1}: {item}", use_unicode)
+        checkbox_line(pdf, f"Day {i+1}: {item}")
 
     # Tiny Progress Tracker (checkboxes) — repeat here for visibility
     pdf.ln(2)
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 14); pdf.cell(0, 8, "Tiny Progress Tracker", ln=True)
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12)
+    pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, safe_text("Tiny Progress Tracker"), ln=True)
+    pdf.set_font("Arial", "", 12)
     milestones = sections.get("actions") or [
         "Choose one tiny step and schedule it.",
         "Tell a friend your plan for gentle accountability.",
         "Spend 20 minutes on your step and celebrate completion."
     ]
     for m in milestones[:3]:
-        checkbox_line(pdf, m, use_unicode)
+        checkbox_line(pdf, m)
     pdf.ln(2)
 
     # Footer
-    pdf.set_font("DejaVu" if use_unicode else "Arial", "I", 10); pdf.ln(2)
-    pdf.multi_cell(0, 5, ("Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice." if use_unicode else safe_text("Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice.")))
+    pdf.set_font("Arial", "I", 10); pdf.ln(2)
+    pdf.multi_cell(0, 5, safe_text("Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice."))
     return pdf.output(dest="S").encode("latin-1")
 
 # ---------- UI ----------
@@ -531,7 +511,6 @@ if st.session_state.get("first_name"):
     with st.expander("Personalization options"):
         horizon_weeks = st.slider("Future snapshot horizon (weeks)", 2, 8, 4)
         depth_mode = st.selectbox("Depth of AI write‑up", ["Standard", "High"], index=0)
-        # Remember in session for other logic, if needed later
         st.session_state["depth"] = "high" if depth_mode == "High" else "standard"
 
     for q in questions:
@@ -545,7 +524,7 @@ if st.session_state.get("first_name"):
             free_text_val = st.text_area("Your answer", key=f"{q['id']}_free", height=80, placeholder="Type your own response...")
         elif selected is not None:
             choice_idx = options.index(selected)
-            if choice_idx == len(options) - 1:  # the free-text option
+            if choice_idx == len(options) - 1:
                 choice_idx = None
 
         answers[q["id"]] = {"choice_idx": choice_idx, "free_text": free_text_val}
@@ -583,7 +562,6 @@ if st.session_state.get("first_name"):
                 sections.update(maybe)
                 if sections.get("weights"):
                     scores = apply_free_text_weights(scores, sections["weights"])
-                # remember horizon for the PDF
                 sections["horizon_weeks"] = horizon_weeks
 
         # Fallback sections if AI off or failed
