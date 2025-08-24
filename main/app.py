@@ -26,6 +26,13 @@ def load_questions(filename: str = "questions.json") -> Tuple[List[dict], List[s
     path = base_dir / filename
     if not path.exists():
         st.error(f"Could not find {filename} at {path}. It must sit next to main/app.py.")
+        # Show listing to help debugging on Cloud
+        try:
+            st.caption("Directory listing for diagnostics:")
+            for p in base_dir.iterdir():
+                st.write("-", p.name)
+        except Exception:
+            pass
         st.stop()
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
@@ -66,6 +73,7 @@ def try_add_unicode_font(pdf: FPDF) -> bool:
         try:
             pdf.add_font("DejaVu", "", str(font_path), uni=True)
             pdf.add_font("DejaVu", "B", str(font_path), uni=True)
+            pdf.add_font("DejaVu", "I", str(font_path), uni=True)
             return True
         except Exception:
             return False
@@ -92,9 +100,10 @@ def ai_sections_and_weights(
     scores: Dict[str, int],
     top3: List[str],
     free_responses: List[dict],
-    first_name: str
+    first_name: str,
+    horizon_weeks: int = 4,
 ) -> Optional[dict]:
-    """Deep read + weights for free-text answers."""
+    """Deep read + weights for free-text answers, plus a Future Snapshot."""
     if not USE_AI:
         return None
     try:
@@ -121,14 +130,17 @@ def ai_sections_and_weights(
             "  affirmation (string <= 15 words), quote (string <= 20 words),\n"
             "  signature_metaphor (string <= 12 words), signature_sentence (string <= 20 words),\n"
             "  top_theme_boosters (array of up to 3 short suggestions), pitfalls (array of up to 3),\n"
+            "  future_snapshot (string, 80-100 words, second-person, present tense, written AS IF it is {horizon} "
+            "weeks later and the person followed through),\n"
             "  weights (object mapping question_id -> object of theme:int in [-2,2]).\n"
             f"User first name: {first_name or 'Friend'}.\n"
             f"Theme scores so far: {score_lines}.\n"
             f"Top 3 themes: {', '.join(top3)}.\n"
+            f"Horizon weeks: {horizon_weeks}.\n"
             "Also consider these free-text answers (omit weights for questions you don't see):\n"
             f"{json.dumps(packed, ensure_ascii=False)}\n"
             "Tone: empathetic, encouraging, plain language. No medical/clinical claims. JSON only."
-        )
+        ).format(horizon=horizon_weeks)
 
         resp = client.responses.create(
             model=OPENAI_MODEL,
@@ -162,6 +174,7 @@ def ai_sections_and_weights(
             "signature_sentence": str(data.get("signature_sentence", "")),
             "top_theme_boosters": [str(x) for x in (data.get("top_theme_boosters") or [])][:3],
             "pitfalls": [str(x) for x in (data.get("pitfalls") or [])][:3],
+            "future_snapshot": str(data.get("future_snapshot", "")),
             "weights": {},
         }
 
@@ -273,6 +286,15 @@ def label_value(pdf: FPDF, label: str, value: str, use_unicode: bool):
     pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 12); pdf.cell(0, 6, (label), ln=True)
     pdf.set_font("DejaVu" if use_unicode else "Arial", "", 12);  pdf.multi_cell(0, 6, value if use_unicode else safe_text(value))
 
+def future_callout(pdf: FPDF, weeks: int, text: str, use_unicode: bool):
+    pdf.set_text_color(30, 60, 120)
+    pdf.set_font("DejaVu" if use_unicode else "Arial", "B", 14)
+    pdf.cell(0, 8, f"Future Snapshot — {weeks} weeks", ln=True)
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_font("DejaVu" if use_unicode else "Arial", "I", 12)
+    pdf.multi_cell(0, 6, text if use_unicode else safe_text(text))
+    pdf.ln(2)
+
 def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: List[str],
                    sections: dict, free_responses: List[dict], logo_path: Optional[str]) -> bytes:
     pdf = FPDF()
@@ -323,6 +345,10 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
 
     if sections.get("why_now"):
         label_value(pdf, "Why this matters now", sections["why_now"], use_unicode); pdf.ln(1)
+
+    # Future Snapshot callout
+    if sections.get("future_snapshot"):
+        future_callout(pdf, sections.get("horizon_weeks", 4), sections["future_snapshot"], use_unicode)
 
     # Strengths / Energizers / Drainers
     if sections.get("strengths"):
@@ -410,7 +436,6 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         if sections.get("affirmation"):
             pdf.multi_cell(0, 6, (f"Affirmation: {sections['affirmation']}" if use_unicode else safe_text(f"Affirmation: {sections['affirmation']}")))
         if sections.get("quote"):
-            # smart quotes OK in Unicode font; else mapped via safe_text earlier
             qtext = f"“{sections['quote']}”" if use_unicode else f"\u201c{sections['quote']}\u201d"
             pdf.multi_cell(0, 6, (qtext if use_unicode else safe_text(qtext)))
         pdf.ln(2)
@@ -480,6 +505,10 @@ if st.session_state.get("first_name"):
     answers: Dict[str, dict] = {}
     free_responses: List[dict] = []
 
+    # Optional: Future Snapshot horizon
+    with st.expander("Personalization options"):
+        horizon_weeks = st.slider("Future snapshot horizon (weeks)", 2, 8, 4)
+
     for q in questions:
         st.subheader(q["text"])
         options = [c["label"] for c in q["choices"]] + ["✍️ I’ll write my own answer"]
@@ -517,11 +546,19 @@ if st.session_state.get("first_name"):
         # If AI available, ask for sections + weights for free answers
         sections = {"summary": "", "actions": [], "weekly_plan": [], "weights": {}}
         if USE_AI:
-            maybe = ai_sections_and_weights(scores, top_themes(scores), free_responses, st.session_state.get("first_name",""))
+            maybe = ai_sections_and_weights(
+                scores,
+                top_themes(scores),
+                free_responses,
+                st.session_state.get("first_name",""),
+                horizon_weeks=horizon_weeks,
+            )
             if maybe:
                 sections.update(maybe)
                 if sections.get("weights"):
                     scores = apply_free_text_weights(scores, sections["weights"])
+                # remember horizon for the PDF
+                sections["horizon_weeks"] = horizon_weeks
 
         # Fallback sections if AI off or failed
         if not sections.get("deep_insight"):
@@ -540,10 +577,19 @@ if st.session_state.get("first_name"):
                 "Offer help or encouragement to someone.",
                 "Review your week and set the next tiny step.",
             ]
+            fsnap = (
+                f"It’s {horizon_weeks} weeks later. You’ve stayed close to what matters, "
+                f"protecting time for {top_themes(scores)[0] if top_themes(scores) else 'what energizes you'}. "
+                f"Your days feel more intentional and lighter: a few tiny actions, repeated, build confidence. "
+                f"You check in with people who support you, and you’re proud of a small win you can point to. "
+                f"When setbacks pop up, you pause, adjust, and keep going. You can see your direction now—and it feels like you."
+            )
             sections = {
                 "deep_insight": base,
                 "actions": actions,
                 "weekly_plan": plan,
+                "future_snapshot": fsnap,
+                "horizon_weeks": horizon_weeks,
                 "weights": {},
                 "archetype": "",
                 "core_need": "",
