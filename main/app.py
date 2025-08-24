@@ -84,16 +84,20 @@ def generate_report_text(email, scores, top3):
     ]
     fallback = "\n".join(base_copy)
 
-    if USE_AI:
-        score_lines = ", ".join([f"{k}: {v}" for k, v in scores.items()])
-        prompt = f"""Create a friendly, empowering summary (140-200 words) for a user with these theme scores: {score_lines}.
-Top 3 themes: {', '.join(top3)}.
-Voice: empathetic, practical, and encouraging; avoid medical claims.
-Give 3 short bullet-point actions for the next 7 days, tailored to the themes.
-Do not mention scores. Address the reader as 'you'."""
-        ai_text = ai_paragraph(prompt)
-        if ai_text:
-            return ai_text
+   if USE_AI:
+    score_lines = ", ".join([f"{k}: {v}" for k, v in scores.items()])
+    prompt = (
+        "Create a friendly, empowering summary (140-200 words) for a user with these theme scores: "
+        f"{score_lines}.\n"
+        f"Top 3 themes: {', '.join(top3)}.\n"
+        "Voice: empathetic, practical, and encouraging; avoid medical claims.\n"
+        "Give 3 short bullet-point actions for the next 7 days, tailored to the themes.\n"
+        "Do not mention scores. Address the reader as 'you'."
+    )
+    ai_text = ai_paragraph(prompt)
+    if ai_text:
+        return ai_text
+
     return fallback
 
 def make_pdf_bytes(name_email, scores, top3, narrative):
