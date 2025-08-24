@@ -1,5 +1,4 @@
 import os
-import sys
 import json
 import datetime
 import unicodedata
@@ -26,11 +25,12 @@ def load_questions(filename: str = "questions.json"):
         data = json.load(f)
     return data["questions"], data.get("themes", [])
 
-# ------------ PDF text safety (FPDF is Latin-1) ------------
+# ------------ PDF text safety (FPDF core fonts are Latin-1) ------------
 def safe_text(s: str) -> str:
     if s is None:
         return ""
     s = str(s)
+    # Map common curly punctuation to ASCII so FPDF doesn't crash
     s = (s.replace("\u2019", "'")   # ’
            .replace("\u2018", "'")  # ‘
            .replace("\u201c", '"')  # “
@@ -40,7 +40,7 @@ def safe_text(s: str) -> str:
     s = unicodedata.normalize("NFKD", s).encode("latin-1", "ignore").decode("latin-1")
     return s
 
-# ------------ Optional AI (set OPENAI_API_KEY in Secrets to enable) ------------
+# ------------ Optional AI (set OPENAI_API_KEY in Secrets) ------------
 USE_AI = bool(os.getenv("OPENAI_API_KEY"))
 if USE_AI:
     try:
@@ -48,6 +48,39 @@ if USE_AI:
         openai_client = OpenAI()
     except Exception:
         USE_AI = False
+
+def ai_report_sections(scores: dict, top3: list) -> dict | None:
+    """Ask the model for structured JSON (summary, actions[], weekly_plan[])."""
+    if not USE_AI:
+        return None
+    score_lines = ", ".join([f"{k}: {v}" for k, v in scores.items()])
+    prompt = (
+        "You are a warm, practical life coach. Return ONLY valid JSON with keys: "
+        "summary (string, 140-220 words), actions (array of 3 short bullet strings), "
+        "weekly_plan (array of 7 brief day-plan strings). "
+        f"User theme scores: {score_lines}. Top 3 themes: {', '.join(top3)}. "
+        "Tone: empathetic, encouraging, plain language. No medical/clinical claims."
+    )
+    try:
+        resp = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "Reply with concise, helpful coaching guidance as valid JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+            max_tokens=500,
+        )
+        raw = resp.choices[0].message.content or "{}"
+        data = json.loads(raw)
+        return {
+            "summary": str(data.get("summary", "")),
+            "actions": [str(a) for a in (data.get("actions") or [])][:5],
+            "weekly_plan": [str(a) for a in (data.get("weekly_plan") or [])][:7],
+        }
+    except Exception:
+        return None
 
 # ------------ Scoring helpers ------------
 def compute_scores(answers: dict, questions: list) -> dict:
@@ -68,86 +101,105 @@ def compute_scores(answers: dict, questions: list) -> dict:
 def top_themes(scores: dict, k: int = 3) -> list:
     return [name for name, _ in sorted(scores.items(), key=lambda x: x[1], reverse=True)[:k]]
 
-def ai_paragraph(prompt: str) -> str | None:
-    if not USE_AI:
-        return None
-    try:
-        resp = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a warm, practical life coach. Be concise and supportive."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.7,
-            max_tokens=300,
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception:
-        return None
+# ------------ Pretty PDF helpers (bars + sections) ------------
+def draw_scores_barchart(pdf: FPDF, scores: dict):
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 8, safe_text("Your Theme Snapshot"), ln=True)
+    pdf.set_font("Arial", "", 12)
+    max_score = max(max(scores.values()), 1)
+    bar_w_max = 120  # width of the longest bar
+    x_left = pdf.get_x() + 10
+    y = pdf.get_y()
+    for theme in THEMES:
+        val = scores.get(theme, 0)
+        bar_w = (val / max_score) * bar_w_max
+        # label
+        pdf.set_xy(x_left, y)
+        pdf.cell(35, 6, safe_text(theme))
+        # bar
+        pdf.set_fill_color(30, 144, 255)  # blue
+        pdf.rect(x_left + 38, y + 1.3, bar_w, 4.5, "F")
+        # value
+        pdf.set_xy(x_left + 38 + bar_w + 2, y)
+        pdf.cell(0, 6, safe_text(str(val)))
+        y += 7
+    pdf.set_y(y + 4)
 
-def generate_report_text(email: str, scores: dict, top3: list) -> str:
-    base_copy = [
-        "Thank you for completing the Reflection Quiz. Below are your top themes and next-step ideas tailored for you.",
-        *[f"- {theme}: Consider one simple action this week to build momentum in this area." for theme in top3],
-        "Tip: Small consistent actions beat big one-off efforts. Be kind to yourself as you experiment.",
-    ]
-    fallback = "\n".join(base_copy)
+def paragraph(pdf: FPDF, title: str, body: str):
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 8, safe_text(title), ln=True)
+    pdf.set_font("Arial", "", 12)
+    for line in safe_text(body).split("\n"):
+        pdf.multi_cell(0, 6, line)
+    pdf.ln(2)
 
-    if USE_AI:
-        score_lines = ", ".join([f"{k}: {v}" for k, v in scores.items()])
-        prompt = (
-            "Create a friendly, empowering summary (140-200 words) for a user with these theme scores: "
-            f"{score_lines}.\n"
-            f"Top 3 themes: {', '.join(top3)}.\n"
-            "Voice: empathetic, practical, and encouraging; avoid medical claims.\n"
-            "Give 3 short bullet-point actions for the next 7 days, tailored to the themes.\n"
-            "Do not mention scores. Address the reader as 'you'."
-        )
-        ai_text = ai_paragraph(prompt)
-        if ai_text:
-            return ai_text
-    return fallback
+def bullets(pdf: FPDF, title: str, items: list):
+    if not items:
+        return
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 8, safe_text(title), ln=True)
+    pdf.set_font("Arial", "", 12)
+    for it in items:
+        pdf.cell(4, 6, u"*")
+        pdf.multi_cell(0, 6, safe_text(it))
+    pdf.ln(1)
 
-# ------------ PDF builder ------------
-def make_pdf_bytes(name_email: str, scores: dict, top3: list, narrative: str) -> bytes:
+def make_pdf_bytes(email: str, scores: dict, top3: list, sections: dict) -> bytes:
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 
+    # Title block
     pdf.set_font("Arial", "B", 18)
     pdf.cell(0, 10, safe_text(REPORT_TITLE), ln=True)
-
     pdf.set_font("Arial", "", 12)
     today = datetime.date.today().strftime("%d %b %Y")
     pdf.cell(0, 8, safe_text(f"Date: {today}"), ln=True)
-    if name_email:
-        pdf.cell(0, 8, safe_text(f"Email: {name_email}"), ln=True)
-    pdf.ln(6)
+    if email:
+        pdf.cell(0, 8, safe_text(f"Email: {email}"), ln=True)
+    pdf.ln(2)
 
-    pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 8, safe_text("Your Theme Snapshot"), ln=True)
-    pdf.set_font("Arial", "", 12)
-    for t in THEMES:
-        pdf.cell(0, 7, safe_text(f"- {t}: {scores.get(t, 0)}"), ln=True)
-    pdf.ln(4)
-
+    # Top themes
     pdf.set_font("Arial", "B", 14)
     pdf.cell(0, 8, safe_text("Top Themes"), ln=True)
     pdf.set_font("Arial", "", 12)
     pdf.multi_cell(0, 6, safe_text(", ".join(top3)))
     pdf.ln(2)
 
-    pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 8, safe_text("Your Personalized Guidance"), ln=True)
-    pdf.set_font("Arial", "", 12)
-    for line in safe_text(narrative).split("\n"):
-        pdf.multi_cell(0, 6, line)
+    # Bars
+    draw_scores_barchart(pdf, scores)
 
-    pdf.ln(6)
+    # Narrative sections
+    paragraph(pdf, "Personalized Summary", sections.get("summary", ""))
+    bullets(pdf, "Three Next-Step Actions (7 days)", sections.get("actions", []))
+    weekly = [f"Day {i+1}: {t}" for i, t in enumerate(sections.get("weekly_plan", []))]
+    bullets(pdf, "1-Week Gentle Plan", weekly)
+
+    # Footer
     pdf.set_font("Arial", "I", 10)
-    pdf.multi_cell(0, 6, safe_text("Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice."))
+    pdf.ln(2)
+    pdf.multi_cell(0, 5, safe_text("Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice."))
 
     return pdf.output(dest="S").encode("latin-1")
+
+# ------------ Non-AI fallback ------------
+def fallback_sections(scores: dict, top3: list) -> dict:
+    base = "Thank you for completing the Reflection Quiz. Below are your top themes and next-step ideas tailored for you."
+    actions = [
+        f"Choose one tiny step to honor {top3[0].lower()} this week.",
+        "Tell a friend your plan—gentle accountability.",
+        "Schedule 20 minutes for reflection or journaling."
+    ]
+    plan = [
+        "Name your intention.",
+        "15–20 minutes of learning or practice.",
+        "Reach out to someone who energizes you.",
+        "Take a calm walk or mindful pause.",
+        "Do one small adventurous thing.",
+        "Offer help or encouragement to someone.",
+        "Review your week and set the next tiny step.",
+    ]
+    return {"summary": base, "actions": actions, "weekly_plan": plan}
 
 # ------------ UI ------------
 with st.form("email_form"):
@@ -186,8 +238,13 @@ if st.session_state.get("submitted_once"):
         if st.button("Finish and Generate My Report"):
             scores = compute_scores(answers, questions)
             top3 = top_themes(scores, 3)
-            narrative = generate_report_text(st.session_state.get("email", ""), scores, top3)
-            pdf_bytes = make_pdf_bytes(st.session_state.get("email", ""), scores, top3, narrative)
+
+            # AI sections or fallback
+            sections = ai_report_sections(scores, top3) if USE_AI else None
+            if sections is None:
+                sections = fallback_sections(scores, top3)
+
+            pdf_bytes = make_pdf_bytes(st.session_state.get("email", ""), scores, top3, sections)
 
             st.success("Your personalized report is ready!")
             st.download_button(
