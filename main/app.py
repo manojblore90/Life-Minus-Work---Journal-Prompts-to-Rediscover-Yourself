@@ -14,7 +14,7 @@ REPORT_TITLE = "Your Reflection Report"
 THEMES = ["Identity", "Growth", "Connection", "Peace", "Adventure", "Contribution"]
 
 # Read model from env if provided, else default
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano")  # or "gpt-4o-mini"
+DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano")  # can be overridden dynamically
 
 st.set_page_config(page_title=APP_TITLE, page_icon="✨", layout="centered")
 st.title(APP_TITLE)
@@ -26,7 +26,6 @@ def load_questions(filename: str = "questions.json") -> Tuple[List[dict], List[s
     path = base_dir / filename
     if not path.exists():
         st.error(f"Could not find {filename} at {path}. It must sit next to main/app.py.")
-        # Show listing to help debugging on Cloud
         try:
             st.caption("Directory listing for diagnostics:")
             for p in base_dir.iterdir():
@@ -96,12 +95,27 @@ def safe_text(s: str) -> str:
 # ---------- Optional AI ----------
 USE_AI = bool(os.getenv("OPENAI_API_KEY"))
 
+def pick_model(total_free_chars: int, depth_mode: str, base_model: str = DEFAULT_MODEL) -> str:
+    """Upgrade to gpt-5-mini when there's lots of free text or user picks 'High' depth.
+    If the env model is already higher-end (e.g., gpt-5 or gpt-5-mini), keep it.
+    If env model is 4-series (e.g., gpt-4o-mini), still allow upgrade to 5-mini when needed.
+    """
+    lower = (base_model or "").lower()
+    # If user already forced a bigger model, respect it
+    if any(tag in lower for tag in ["gpt-5-mini", "gpt-5 " , "gpt-5\n"]):
+        return base_model
+    # Router: lots of text OR depth=High -> upgrade
+    if total_free_chars > 500 or depth_mode == "High":
+        return "gpt-5-mini"
+    return base_model or "gpt-5-nano"
+
 def ai_sections_and_weights(
     scores: Dict[str, int],
     top3: List[str],
     free_responses: List[dict],
     first_name: str,
     horizon_weeks: int = 4,
+    depth_mode: str = "Standard",
 ) -> Optional[dict]:
     """Deep read + weights for free-text answers, plus a Future Snapshot."""
     if not USE_AI:
@@ -115,6 +129,9 @@ def ai_sections_and_weights(
             {"id": fr["id"], "q": fr["question"], "a": str(fr.get("answer", ""))[:280]}
             for fr in free_responses if fr.get("answer")
         ]
+        total_free_chars = sum(len(p.get("a","")) for p in packed)
+        model = pick_model(total_free_chars, depth_mode, DEFAULT_MODEL)
+        max_tokens = 1100 if (depth_mode == "High" or model.endswith("mini")) else 900
 
         prompt = (
             "You are a warm, practical life coach. Return ONLY valid JSON with keys:\n"
@@ -143,15 +160,20 @@ def ai_sections_and_weights(
         ).format(horizon=horizon_weeks)
 
         resp = client.responses.create(
-            model=OPENAI_MODEL,
+            model=model,
             response_format={"type": "json_object"},
             input=[
                 {"role": "system", "content": "Reply with helpful coaching guidance as STRICT JSON only."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.7,
-            max_output_tokens=1100,
+            max_output_tokens=max_tokens,
         )
+        try:
+            st.caption(f"AI model used: {model} (max_tokens={max_tokens})")
+        except Exception:
+            pass
+
         raw = resp.output_text or "{}"
         data = json.loads(raw)
 
@@ -505,9 +527,12 @@ if st.session_state.get("first_name"):
     answers: Dict[str, dict] = {}
     free_responses: List[dict] = []
 
-    # Optional: Future Snapshot horizon
+    # Personalization options
     with st.expander("Personalization options"):
         horizon_weeks = st.slider("Future snapshot horizon (weeks)", 2, 8, 4)
+        depth_mode = st.selectbox("Depth of AI write‑up", ["Standard", "High"], index=0)
+        # Remember in session for other logic, if needed later
+        st.session_state["depth"] = "high" if depth_mode == "High" else "standard"
 
     for q in questions:
         st.subheader(q["text"])
@@ -552,6 +577,7 @@ if st.session_state.get("first_name"):
                 free_responses,
                 st.session_state.get("first_name",""),
                 horizon_weeks=horizon_weeks,
+                depth_mode=depth_mode,
             )
             if maybe:
                 sections.update(maybe)
