@@ -10,6 +10,9 @@ APP_TITLE = "Life Minus Work — Reflection Quiz (15 questions)"
 REPORT_TITLE = "Your Reflection Report"
 THEMES = ["Identity", "Growth", "Connection", "Peace", "Adventure", "Contribution"]
 
+# ---- Choose your model here ----
+OPENAI_MODEL = "gpt-5-nano"   # or "gpt-4o-mini"
+
 st.set_page_config(page_title=APP_TITLE, page_icon="✨", layout="centered")
 st.title(APP_TITLE)
 st.write("Answer 15 questions and instantly download a personalized PDF summary.")
@@ -37,46 +40,45 @@ def safe_text(s: str) -> str:
            .replace("\u201d", '"')  # ”
            .replace("\u2013", "-")  # –
            .replace("\u2014", "-")) # —
+    # Drop anything Latin-1 can't handle
     s = unicodedata.normalize("NFKD", s).encode("latin-1", "ignore").decode("latin-1")
     return s
 
 # ------------ Optional AI (set OPENAI_API_KEY in Secrets) ------------
 USE_AI = bool(os.getenv("OPENAI_API_KEY"))
-if USE_AI:
-    try:
-        from openai import OpenAI
-        openai_client = OpenAI()
-    except Exception:
-        USE_AI = False
-
 def ai_report_sections(scores: dict, top3: list) -> dict | None:
-    """Ask the model for structured JSON (summary, actions[], weekly_plan[])."""
     if not USE_AI:
         return None
-    score_lines = ", ".join([f"{k}: {v}" for k, v in scores.items()])
-    prompt = (
-        "You are a warm, practical life coach. Return ONLY valid JSON with keys: "
-        "summary (string, 140-220 words), actions (array of 3 short bullet strings), "
-        "weekly_plan (array of 7 brief day-plan strings). "
-        f"User theme scores: {score_lines}. Top 3 themes: {', '.join(top3)}. "
-        "Tone: empathetic, encouraging, plain language. No medical/clinical claims."
-    )
     try:
-        resp = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+        from openai import OpenAI
+        client = OpenAI()  # reads OPENAI_API_KEY from environment/Secrets
+
+        score_lines = ", ".join([f"{k}: {v}" for k, v in scores.items()])
+        prompt = (
+            "You are a warm, practical life coach. Return ONLY valid JSON with keys: "
+            'summary (string, 140-220 words), actions (array of exactly 3 short bullet strings), '
+            "weekly_plan (array of 7 brief day-plan strings). "
+            f"User theme scores: {score_lines}. Top 3 themes: {', '.join(top3)}. "
+            "Tone: empathetic, encouraging, plain language. "
+            "No medical/clinical claims. Do not include extra commentary outside the JSON."
+        )
+
+        resp = client.responses.create(
+            model=OPENAI_MODEL,
             response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": "Reply with concise, helpful coaching guidance as valid JSON."},
+            input=[
+                {"role": "system", "content": "Reply with concise, helpful coaching guidance as valid JSON only."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.7,
-            max_tokens=500,
+            max_output_tokens=500,
         )
-        raw = resp.choices[0].message.content or "{}"
+        raw = resp.output_text or "{}"
         data = json.loads(raw)
+        # normalize shape
         return {
             "summary": str(data.get("summary", "")),
-            "actions": [str(a) for a in (data.get("actions") or [])][:5],
+            "actions": [str(a) for a in (data.get("actions") or [])][:3],
             "weekly_plan": [str(a) for a in (data.get("weekly_plan") or [])][:7],
         }
     except Exception:
@@ -140,7 +142,7 @@ def bullets(pdf: FPDF, title: str, items: list):
     pdf.cell(0, 8, safe_text(title), ln=True)
     pdf.set_font("Arial", "", 12)
     for it in items:
-        pdf.cell(4, 6, u"*")
+        pdf.cell(4, 6, "*")
         pdf.multi_cell(0, 6, safe_text(it))
     pdf.ln(1)
 
