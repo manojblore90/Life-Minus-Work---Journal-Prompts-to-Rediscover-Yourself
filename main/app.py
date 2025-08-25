@@ -1,4 +1,3 @@
-
 import os
 import json
 import datetime
@@ -15,8 +14,8 @@ THEMES = ["Identity", "Growth", "Connection", "Peace", "Adventure", "Contributio
 
 # Deluxe defaults (force High every time)
 HIGH_MODEL   = os.getenv("OPENAI_HIGH_MODEL", "gpt-5-mini")
-MAX_TOK_HIGH = int(os.getenv("MAX_OUTPUT_TOKENS_HIGH", 7000))   # generous default
-FALLBACK_CAP = int(os.getenv("MAX_OUTPUT_TOKENS_FALLBACK", 6000))  # reliable fallback
+MAX_TOK_HIGH = int(os.getenv("MAX_OUTPUT_TOKENS_HIGH", 7000))        # generous default
+FALLBACK_CAP = int(os.getenv("MAX_OUTPUT_TOKENS_FALLBACK", 6000))    # reliable fallback
 
 st.set_page_config(page_title=APP_TITLE, page_icon="✨", layout="centered")
 st.title(APP_TITLE)
@@ -57,8 +56,7 @@ def get_logo_png_path() -> Optional[str]:
                 return str(p)
             if p.suffix.lower() == ".webp":
                 try:
-                    # FPDF 1.x can't handle alpha; flatten to RGB.
-                    img = Image.open(p).convert("RGB")
+                    img = Image.open(p).convert("RGB")  # flatten to RGB (no alpha)
                     out = Path("/tmp/logo.png")
                     img.save(out, format="PNG")
                     return str(out)
@@ -111,7 +109,7 @@ def ai_sections_and_weights(
         total_free_chars = sum(len(p.get("a","")) for p in packed)
         model, max_tokens = pick_model(total_free_chars, depth_mode)
 
-        # Bumped word targets for deluxe depth
+        # Deluxe JSON schema including "from_words" + "micro_pledge"
         prompt = (
             "You are a warm, practical life coach. Return ONLY valid JSON with keys:\n"
             "  archetype (string), core_need (string),\n"
@@ -128,6 +126,13 @@ def ai_sections_and_weights(
             "  top_theme_boosters (array of up to 4 short suggestions), pitfalls (array of up to 4),\n"
             "  future_snapshot (string, 150-220 words, second-person, present tense, written AS IF it is {h} "
             "weeks later and the person followed through),\n"
+            "  from_words (object) with: themes (array of EXACTLY 3 short bullets),\n"
+            "              quotes (array of 2–3 short verbatim quotes from the user's text, <=12 words each),\n"
+            "              insight (string, 80–120 words tying their quotes to top themes),\n"
+            "              ritual (one-liner daily ritual drawn from their words),\n"
+            "              relationship_moment (one-liner if partner/family appears),\n"
+            "              stress_reset (one-liner using their stated reset method),\n"
+            "  micro_pledge (string, first-person <= 28 words, derived from their phrases),\n"
             "  weights (object mapping question_id -> object of theme:int in [-2,2]).\n"
             f"User first name: {first_name or 'Friend'}.\n"
             f"Theme scores so far: {score_lines}.\n"
@@ -165,8 +170,10 @@ def ai_sections_and_weights(
         try:
             u = getattr(resp, "usage", None)
             if u:
-                st.caption(f"AI model: {model} • input={getattr(u,'input_tokens','?')} "
-                           f"output={getattr(u,'output_tokens','?')} total={getattr(u,'total_tokens','?')}")
+                st.caption(
+                    f"AI model: {model} • input={getattr(u,'input_tokens','?')} "
+                    f"output={getattr(u,'output_tokens','?')} total={getattr(u,'total_tokens','?')}"
+                )
             else:
                 st.caption(f"AI model: {model} • max_output_tokens={max_tokens}")
         except Exception:
@@ -196,6 +203,18 @@ def ai_sections_and_weights(
             "pitfalls": [str(x) for x in (data.get("pitfalls") or [])][:4],
             "future_snapshot": str(data.get("future_snapshot", "")),
             "weights": {},
+            "from_words": {},
+            "micro_pledge": str(data.get("micro_pledge", "")),
+        }
+
+        fw = data.get("from_words") or {}
+        out["from_words"] = {
+            "themes": [str(x) for x in (fw.get("themes") or [])][:3],
+            "quotes": [str(x) for x in (fw.get("quotes") or [])][:3],
+            "insight": str(fw.get("insight", "")),
+            "ritual": str(fw.get("ritual", "")),
+            "relationship_moment": str(fw.get("relationship_moment", "")),
+            "stress_reset": str(fw.get("stress_reset", "")),
         }
 
         weights = data.get("weights") or {}
@@ -301,6 +320,25 @@ def future_callout(pdf: FPDF, weeks: int, text: str):
     pdf.multi_cell(0, 6, safe_text(text))
     pdf.ln(2)
 
+def left_bar_callout(pdf: FPDF, title: str, body: str, bullets=None):
+    if bullets is None:
+        bullets = []
+    x = pdf.get_x()
+    y = pdf.get_y()
+    pdf.set_fill_color(30, 144, 255)   # left bar
+    pdf.rect(x, y, 2, 6, "F")
+    pdf.set_x(x + 4)
+    pdf.set_font("Arial", "B", 13)
+    pdf.cell(0, 6, safe_text(title), ln=True)
+    pdf.set_x(x + 4)
+    pdf.set_font("Arial", "", 12)
+    pdf.multi_cell(0, 6, safe_text(body))
+    for b in bullets:
+        pdf.set_x(x + 4)
+        pdf.cell(4, 6, "•")
+        pdf.multi_cell(0, 6, safe_text(b))
+    pdf.ln(1)
+
 def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: List[str],
                    sections: dict, free_responses: List[dict], logo_path: Optional[str]) -> bytes:
     pdf = FPDF()
@@ -342,6 +380,23 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
 
     # Score bars
     draw_scores_barchart(pdf, scores)
+
+    # From your words (new)
+    fw = sections.get("from_words") or {}
+    if fw and (fw.get("insight") or fw.get("themes") or fw.get("quotes")):
+        quotes = [f'"{q}"' for q in fw.get("quotes", []) if q]
+        left_bar_callout(pdf, "From your words", fw.get("insight",""), bullets=quotes)
+        keep = [("Daily ritual", fw.get("ritual","")),
+                ("Connection moment", fw.get("relationship_moment","")),
+                ("Stress reset", fw.get("stress_reset",""))]
+        if any(v for _, v in keep):
+            pdf.set_font("Arial","B",12); pdf.cell(0,6, safe_text("One-liners to keep"), ln=True)
+            pdf.set_font("Arial","",12)
+            for lbl, val in keep:
+                if val: pdf.multi_cell(0,6, safe_text(f"{lbl}: {val}"))
+            pdf.ln(1)
+    if sections.get("micro_pledge"):
+        label_value(pdf, "Personal pledge", sections["micro_pledge"]); pdf.ln(1)
 
     # Insight blocks
     if sections.get("deep_insight"):
@@ -530,12 +585,12 @@ if st.session_state.get("first_name"):
 
     for q in questions:
         st.subheader(q["text"])
-        options = [c["label"] for c in q["choices"]] + ["✍️ I’ll write my own answer"]
+        options = [c["label"] for c in q["choices"]] + ["✍️ I'll write my own answer"]
         selected = st.radio("Choose one:", options, index=None, key=f"{q['id']}_choice")
         choice_idx = None
         free_text_val = None
 
-        if selected == "✍️ I’ll write my own answer":
+        if selected == "✍️ I'll write my own answer":
             free_text_val = st.text_area("Your answer", key=f"{q['id']}_free", height=80, placeholder="Type your own response...")
         elif selected is not None:
             choice_idx = options.index(selected)
@@ -597,7 +652,7 @@ if st.session_state.get("first_name"):
                 "Review your week and set the next tiny step.",
             ]
             fsnap = (
-                f"It’s {horizon_weeks} weeks later. You’ve stayed close to what matters, "
+                f"It's {horizon_weeks} weeks later. You’ve stayed close to what matters, "
                 f"protecting time for {top_themes(scores)[0] if top_themes(scores) else 'what energizes you'}. "
                 f"A few tiny actions, repeated, build confidence. You pause, adjust, and keep going."
             )
@@ -618,6 +673,8 @@ if st.session_state.get("first_name"):
                 "pitfalls": [],
                 "tensions": [],
                 "blindspot": "",
+                "from_words": {},
+                "micro_pledge": "",
             }
 
         top3 = top_themes(scores, 3)
