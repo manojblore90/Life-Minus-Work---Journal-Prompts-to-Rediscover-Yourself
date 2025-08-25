@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
 import streamlit as st
-from fpdf import FPDF
 from PIL import Image
+# >>> Unicode-capable PDF engine
+from fpdf import FPDF  # fpdf2
 
 APP_TITLE = "Life Minus Work — Reflection Quiz (15 questions)"
 REPORT_TITLE = "Your Reflection Report"
@@ -30,14 +31,16 @@ OPENAI_API_KEY = get_secret("OPENAI_API_KEY", "")
 if OPENAI_API_KEY:
     os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY  # OpenAI SDK reads from env
 
-# Model + caps (defaults are “deluxe”)
 HIGH_MODEL = get_secret("OPENAI_HIGH_MODEL", "gpt-5-mini")
+
 def _to_int(s: str, fallback: int) -> int:
     try:
         return int(str(s).strip())
     except Exception:
         return fallback
-MAX_TOK_HIGH = _to_int(get_secret("MAX_OUTPUT_TOKENS_HIGH", "7000"), 7000)
+
+# Deluxe caps: 8k primary, 6k fallback (then smaller backoffs)
+MAX_TOK_HIGH = _to_int(get_secret("MAX_OUTPUT_TOKENS_HIGH", "8000"), 8000)
 FALLBACK_CAP = _to_int(get_secret("MAX_OUTPUT_TOKENS_FALLBACK", "6000"), 6000)
 USE_AI = bool(OPENAI_API_KEY)
 
@@ -59,6 +62,11 @@ with st.expander("🔧 Diagnostics (temporary)", expanded=False):
     masked = (OPENAI_API_KEY[:4] + "…" + OPENAI_API_KEY[-4:]) if OPENAI_API_KEY else "None"
     st.write("OPENAI_API_KEY detected:", bool(OPENAI_API_KEY), "| key:", masked if OPENAI_API_KEY else "—")
     st.write("Model:", HIGH_MODEL, "| MAX_TOK_HIGH:", MAX_TOK_HIGH, "| FALLBACK_CAP:", FALLBACK_CAP)
+    try:
+        import fpdf as _fp
+        st.write("fpdf2 version:", getattr(_fp, "__version__", "unknown"))
+    except Exception:
+        pass
     if st.button("Probe: load questions.json"):
         p = here / "questions.json"
         st.write("Path:", str(p), "| exists:", p.exists())
@@ -111,23 +119,64 @@ def get_logo_png_path() -> Optional[str]:
                     return None
     return None
 
-# ---------------- PDF text safety (Latin-1) ----------------
+# ---------------- Latin-1 sanitizer (fallback only) ----------------
 def safe_text(s: str) -> str:
+    """Used ONLY if a Unicode TTF font is not available."""
     if s is None:
         return ""
     s = str(s)
-    s = (s.replace("’", "'")
-         .replace("‘", "'")
-         .replace("“", '"')
-         .replace("”", '"')
-         .replace("–", "-")
-         .replace("—", "-")
-         .replace("…", "...")
-         .replace("•", "*"))
+    s = (s.replace("’", "'").replace("‘", "'")
+           .replace("“", '"').replace("”", '"')
+           .replace("–", "-").replace("—", "-")
+           .replace("…", "...").replace("•", "*"))
     s = unicodedata.normalize("NFKD", s).encode("latin-1", "ignore").decode("latin-1")
     return s
 
-# ---------------- OpenAI wrapper (no temp / no legacy max_tokens) ----------------
+# ---------------- PDF / font helpers (fpdf2 Unicode) ----------------
+def find_ttf_font() -> Optional[str]:
+    """Look for a Unicode TTF font in common locations."""
+    here = Path(__file__).parent
+    candidates = [
+        here / "DejaVuSans.ttf",
+        here / "NotoSans-Regular.ttf",
+        here / "assets" / "DejaVuSans.ttf",
+        here / "assets" / "NotoSans-Regular.ttf",
+        here / "assets" / "fonts" / "DejaVuSans.ttf",
+        here / "assets" / "fonts" / "NotoSans-Regular.ttf",
+    ]
+    for p in candidates:
+        if p.exists():
+            return str(p)
+    return None
+
+def create_pdf() -> Tuple[FPDF, bool]:
+    """
+    Create a Unicode-capable PDF with fpdf2.
+    Returns (pdf, unicode_ok) where unicode_ok indicates we loaded a TTF font.
+    """
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    font_path = find_ttf_font()
+    if font_path:
+        try:
+            pdf.add_font("DejaVu", "", font_path, uni=True)
+            pdf.set_font("DejaVu", "", 12)
+            st.session_state["unicode_font_loaded"] = True
+            return pdf, True
+        except Exception as e:
+            st.warning(f"Could not load TTF font ({font_path}). Falling back to core font. {e}")
+
+    # Fallback: core Helvetica (Latin-1 only); we’ll sanitize strings
+    pdf.set_font("Helvetica", "", 12)
+    st.session_state["unicode_font_loaded"] = False
+    return pdf, False
+
+def T(s: str) -> str:
+    """Text pass-through that sanitizes only if we don't have a Unicode font."""
+    return s if st.session_state.get("unicode_font_loaded") else safe_text(s)
+
+# ---------------- OpenAI wrapper (no temp / correct token params) ----------------
 def _call_openai_json(model: str, system: str, user: str, cap: int):
     """
     Try three paths, recording token usage when available:
@@ -155,7 +204,6 @@ def _call_openai_json(model: str, system: str, user: str, cap: int):
         u = getattr(r, "usage", None)
         usage = None
         if u is not None:
-            # Standardize usage dict
             usage = {
                 "input": getattr(u, "prompt_tokens", None),
                 "output": getattr(u, "completion_tokens", None),
@@ -197,7 +245,6 @@ def _call_openai_json(model: str, system: str, user: str, cap: int):
         u = getattr(r, "usage", None)
         usage = None
         if u is not None:
-            # responses.usage has input_tokens/output_tokens
             usage = {
                 "input": getattr(u, "input_tokens", None),
                 "output": getattr(u, "output_tokens", None),
@@ -206,7 +253,7 @@ def _call_openai_json(model: str, system: str, user: str, cap: int):
             }
         return (text, usage, "responses+merged")
     except Exception as e:
-        raise e  # let the caller surface the most helpful error
+        raise e
 
 # ---------------- AI glue ----------------
 def pick_model(_: int, __: str) -> Tuple[str, int]:
@@ -224,7 +271,6 @@ def ai_sections_and_weights(
         return None
     st.session_state["ai_debug"] = {}
     try:
-        # Pack free text robustly
         packed: List[dict] = []
         allowed_ids: List[str] = []
         for i, fr in enumerate(free_responses or []):
@@ -242,7 +288,6 @@ def ai_sections_and_weights(
         total_free_chars = sum(len(p.get("a","")) for p in packed)
         model, cap0 = pick_model(total_free_chars, depth_mode)
 
-        # Backoff caps
         caps_try = []
         for c in [cap0, 6000, 4000, FALLBACK_CAP, 2500, 1200]:
             if c not in caps_try and c > 0:
@@ -308,7 +353,6 @@ def ai_sections_and_weights(
                         data = json.loads(raw2)
                     else:
                         raise ValueError("No JSON object found in completion.")
-                # Debug + token tracker
                 st.session_state["ai_debug"] = {
                     "path": last_path,
                     "cap_used": cap_used,
@@ -337,7 +381,6 @@ def ai_sections_and_weights(
             st.session_state["ai_debug"] = {"error": f"{type(last_err).__name__}: {last_err}", "path": last_path}
             return None
 
-        # Normalize
         out = {
             "archetype": str(data.get("archetype", "")),
             "core_need": str(data.get("core_need", "")),
@@ -426,11 +469,11 @@ def balancing_suggestion(theme: str) -> str:
     }
     return suggestions.get(theme, "Take one small, visible step this week.")
 
-# ---------------- PDF helpers ----------------
+# ---------------- PDF render helpers (use T() wrapper) ----------------
 def draw_scores_barchart(pdf: FPDF, scores: Dict[str, int]):
-    pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 8, safe_text("Your Theme Snapshot"), ln=True)
-    pdf.set_font("Arial", "", 12)
+    pdf.set_font("", "B", 14)
+    pdf.cell(0, 8, T("Your Theme Snapshot"), ln=True)
+    pdf.set_font("", "", 12)
     max_score = max(max(scores.values()), 1)
     bar_w_max = 120
     x_left = pdf.get_x() + 10
@@ -439,20 +482,20 @@ def draw_scores_barchart(pdf: FPDF, scores: Dict[str, int]):
         val = scores.get(theme, 0)
         bar_w = (val / max_score) * bar_w_max
         pdf.set_xy(x_left, y)
-        pdf.cell(35, 6, safe_text(theme))
+        pdf.cell(35, 6, T(theme))
         pdf.set_fill_color(30, 144, 255)
         pdf.rect(x_left + 38, y + 1.3, bar_w, 4.5, "F")
         pdf.set_xy(x_left + 38 + bar_w + 2, y)
-        pdf.cell(0, 6, safe_text(str(val)))
+        pdf.cell(0, 6, T(str(val)))
         y += 7
     pdf.set_y(y + 4)
 
 def paragraph(pdf: FPDF, title: str, body: str):
-    pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 8, safe_text(title), ln=True)
-    pdf.set_font("Arial", "", 12)
-    for line in safe_text(body).split("\n"):
-        pdf.multi_cell(0, 6, line)
+    pdf.set_font("", "B", 14)
+    pdf.cell(0, 8, T(title), ln=True)
+    pdf.set_font("", "", 12)
+    for line in str(body).split("\n"):
+        pdf.multi_cell(0, 6, T(line))
     pdf.ln(2)
 
 def checkbox_line(pdf: FPDF, text: str):
@@ -460,19 +503,19 @@ def checkbox_line(pdf: FPDF, text: str):
     y = pdf.get_y()
     pdf.rect(x, y + 1.5, 4, 4)
     pdf.set_x(x + 6)
-    pdf.multi_cell(0, 6, safe_text(text))
+    pdf.multi_cell(0, 6, T(text))
 
 def label_value(pdf: FPDF, label: str, value: str):
-    pdf.set_font("Arial", "B", 12); pdf.cell(0, 6, safe_text(label), ln=True)
-    pdf.set_font("Arial", "", 12);  pdf.multi_cell(0, 6, safe_text(value))
+    pdf.set_font("", "B", 12); pdf.cell(0, 6, T(label), ln=True)
+    pdf.set_font("", "", 12);  pdf.multi_cell(0, 6, T(value))
 
 def future_callout(pdf: FPDF, weeks: int, text: str):
     pdf.set_text_color(30, 60, 120)
-    pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 8, safe_text(f"Future Snapshot — {weeks} weeks"), ln=True)
+    pdf.set_font("", "B", 14)
+    pdf.cell(0, 8, T(f"Future Snapshot — {weeks} weeks"), ln=True)
     pdf.set_text_color(0, 0, 0)
-    pdf.set_font("Arial", "I", 12)
-    pdf.multi_cell(0, 6, safe_text(text))
+    pdf.set_font("", "I", 12)
+    pdf.multi_cell(0, 6, T(text))
     pdf.ln(2)
 
 def left_bar_callout(pdf: FPDF, title: str, body: str, bullets=None):
@@ -483,21 +526,20 @@ def left_bar_callout(pdf: FPDF, title: str, body: str, bullets=None):
     pdf.set_fill_color(30, 144, 255)   # left bar
     pdf.rect(x, y, 2, 6, "F")
     pdf.set_x(x + 4)
-    pdf.set_font("Arial", "B", 13)
-    pdf.cell(0, 6, safe_text(title), ln=True)
+    pdf.set_font("", "B", 13)
+    pdf.cell(0, 6, T(title), ln=True)
     pdf.set_x(x + 4)
-    pdf.set_font("Arial", "", 12)
-    pdf.multi_cell(0, 6, safe_text(body))
+    pdf.set_font("", "", 12)
+    pdf.multi_cell(0, 6, T(body))
     for b in bullets:
         pdf.set_x(x + 4)
-        pdf.cell(4, 6, "•")
-        pdf.multi_cell(0, 6, safe_text(b))
+        pdf.cell(4, 6, T("•"))
+        pdf.multi_cell(0, 6, T(b))
     pdf.ln(1)
 
 def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: List[str],
                    sections: dict, free_responses: List[dict], logo_path: Optional[str]) -> bytes:
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf, unicode_ok = create_pdf()
     pdf.add_page()
 
     if logo_path:
@@ -506,15 +548,15 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         except Exception:
             pass
 
-    pdf.set_font("Arial", "B", 18)
-    pdf.cell(0, 10, safe_text(REPORT_TITLE), ln=True)
-    pdf.set_font("Arial", "", 12)
+    pdf.set_font("", "B", 18)
+    pdf.cell(0, 10, T(REPORT_TITLE), ln=True)
+    pdf.set_font("", "", 12)
     today = datetime.date.today().strftime("%d %b %Y")
     greet = f"Hi {first_name}," if first_name else "Hello,"
-    pdf.cell(0, 8, safe_text(greet), ln=True)
-    pdf.cell(0, 8, safe_text(f"Date: {today}"), ln=True)
+    pdf.cell(0, 8, T(greet), ln=True)
+    pdf.cell(0, 8, T(f"Date: {today}"), ln=True)
     if email:
-        pdf.cell(0, 8, safe_text(f"Email: {email}"), ln=True)
+        pdf.cell(0, 8, T(f"Email: {email}"), ln=True)
     pdf.ln(1)
 
     if sections.get("archetype") or sections.get("core_need"):
@@ -526,8 +568,8 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
             label_value(pdf, "Signature Sentence", sections.get("signature_sentence",""))
         pdf.ln(1)
 
-    pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, safe_text("Top Themes"), ln=True)
-    pdf.set_font("Arial", "", 12);  pdf.multi_cell(0, 6, safe_text(", ".join(top3))); pdf.ln(1)
+    pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Top Themes"), ln=True)
+    pdf.set_font("", "", 12);  pdf.multi_cell(0, 6, T(", ".join(top3))); pdf.ln(1)
 
     draw_scores_barchart(pdf, scores)
 
@@ -539,10 +581,10 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
                 ("Connection moment", fw.get("relationship_moment","")),
                 ("Stress reset", fw.get("stress_reset",""))]
         if any(v for _, v in keep):
-            pdf.set_font("Arial","B",12); pdf.cell(0,6, safe_text("One-liners to keep"), ln=True)
-            pdf.set_font("Arial","",12)
+            pdf.set_font("", "B", 12); pdf.cell(0, 6, T("One-liners to keep"), ln=True)
+            pdf.set_font("", "", 12)
             for lbl, val in keep:
-                if val: pdf.multi_cell(0,6, safe_text(f"{lbl}: {val}"))
+                if val: pdf.multi_cell(0, 6, T(f"{lbl}: {val}"))
             pdf.ln(1)
     if sections.get("micro_pledge"):
         label_value(pdf, "Personal pledge", sections["micro_pledge"]); pdf.ln(1)
@@ -557,107 +599,107 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         future_callout(pdf, sections.get("horizon_weeks", 4), sections["future_snapshot"])
 
     if sections.get("strengths"):
-        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Signature strengths", ln=True)
-        pdf.set_font("Arial", "", 12)
+        pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Signature strengths"), ln=True)
+        pdf.set_font("", "", 12)
         for s in sections["strengths"]:
-            pdf.cell(4, 6, "*"); pdf.multi_cell(0, 6, safe_text(s))
+            pdf.cell(4, 6, T("*")); pdf.multi_cell(0, 6, T(s))
         pdf.ln(1)
 
     if sections.get("energizers") or sections.get("drainers"):
-        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Energy map", ln=True)
-        pdf.set_font("Arial", "B", 12); pdf.cell(0, 6, "Energizers", ln=True)
-        pdf.set_font("Arial", "", 12)
+        pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Energy map"), ln=True)
+        pdf.set_font("", "B", 12); pdf.cell(0, 6, T("Energizers"), ln=True)
+        pdf.set_font("", "", 12)
         for e in sections.get("energizers", []):
-            pdf.cell(4, 6, "+"); pdf.multi_cell(0, 6, safe_text(e))
+            pdf.cell(4, 6, T("+")); pdf.multi_cell(0, 6, T(e))
         pdf.ln(1)
-        pdf.set_font("Arial", "B", 12); pdf.cell(0, 6, "Drainers", ln=True)
-        pdf.set_font("Arial", "", 12)
+        pdf.set_font("", "B", 12); pdf.cell(0, 6, T("Drainers"), ln=True)
+        pdf.set_font("", "", 12)
         for d in sections.get("drainers", []):
-            pdf.cell(4, 6, "-"); pdf.multi_cell(0, 6, safe_text(d))
+            pdf.cell(4, 6, T("-")); pdf.multi_cell(0, 6, T(d))
         pdf.ln(1)
 
     if sections.get("tensions"):
-        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Hidden tensions", ln=True)
-        pdf.set_font("Arial", "", 12)
+        pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Hidden tensions"), ln=True)
+        pdf.set_font("", "", 12)
         for t in sections["tensions"]:
-            pdf.cell(4, 6, "*"); pdf.multi_cell(0, 6, safe_text(t))
+            pdf.cell(4, 6, T("*")); pdf.multi_cell(0, 6, T(t))
         pdf.ln(1)
     if sections.get("blindspot"):
         label_value(pdf, "Watch-out (gentle blind spot)", sections["blindspot"]); pdf.ln(1)
 
     if sections.get("actions"):
-        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "3 next-step actions (7 days)", ln=True)
-        pdf.set_font("Arial", "", 12)
+        pdf.set_font("", "B", 14); pdf.cell(0, 8, T("3 next-step actions (7 days)"), ln=True)
+        pdf.set_font("", "", 12)
         for a in sections["actions"]:
             checkbox_line(pdf, a)
         pdf.ln(1)
 
     if sections.get("if_then"):
-        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Implementation intentions (If–Then)", ln=True)
-        pdf.set_font("Arial", "", 12)
+        pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Implementation intentions (If–Then)"), ln=True)
+        pdf.set_font("", "", 12)
         for it in sections.get("if_then", []):
-            pdf.cell(4, 6, "*"); pdf.multi_cell(0, 6, safe_text(it))
+            pdf.cell(4, 6, T("*")); pdf.multi_cell(0, 6, T(it))
         pdf.ln(1)
 
     if sections.get("weekly_plan"):
-        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "1-week gentle plan", ln=True)
-        pdf.set_font("Arial", "", 12)
+        pdf.set_font("", "B", 14); pdf.cell(0, 8, T("1-week gentle plan"), ln=True)
+        pdf.set_font("", "", 12)
         for i, item in enumerate(sections["weekly_plan"][:7]):
-            pdf.cell(0, 6, safe_text(f"Day {i+1}: {item}"), ln=True)
+            pdf.cell(0, 6, T(f"Day {i+1}: {item}"), ln=True)
         pdf.ln(1)
 
     lows = [name for name, _ in sorted(scores.items(), key=lambda x: x[1])[:2]]
     if lows:
-        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Balancing Opportunity", ln=True)
-        pdf.set_font("Arial", "", 12)
+        pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Balancing Opportunity"), ln=True)
+        pdf.set_font("", "", 12)
         for theme in lows:
             tip = balancing_suggestion(theme)
-            pdf.multi_cell(0, 6, safe_text(f"{theme}: {tip}"))
+            pdf.multi_cell(0, 6, T(f"{theme}: {tip}"))
         pdf.ln(1)
 
     if sections.get("top_theme_boosters") or sections.get("pitfalls"):
-        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Amplify what works / Avoid what trips you", ln=True)
+        pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Amplify what works / Avoid what trips you"), ln=True)
         if sections.get("top_theme_boosters"):
-            pdf.set_font("Arial", "B", 12); pdf.cell(0, 6, "Boosters", ln=True)
-            pdf.set_font("Arial", "", 12)
+            pdf.set_font("", "B", 12); pdf.cell(0, 6, T("Boosters"), ln=True)
+            pdf.set_font("", "", 12)
             for b in sections.get("top_theme_boosters", []):
-                pdf.cell(4, 6, "*"); pdf.multi_cell(0, 6, safe_text(b))
+                pdf.cell(4, 6, T("*")); pdf.multi_cell(0, 6, T(b))
         if sections.get("pitfalls"):
-            pdf.set_font("Arial", "B", 12); pdf.cell(0, 6, "Pitfalls", ln=True)
-            pdf.set_font("Arial", "", 12)
+            pdf.set_font("", "B", 12); pdf.cell(0, 6, T("Pitfalls"), ln=True)
+            pdf.set_font("", "", 12)
             for p in sections.get("pitfalls", []):
-                pdf.cell(4, 6, "-"); pdf.multi_cell(0, 6, safe_text(p))
+                pdf.cell(4, 6, T("-")); pdf.multi_cell(0, 6, T(p))
         pdf.ln(1)
 
     if sections.get("affirmation") or sections.get("quote"):
-        pdf.set_font("Arial", "B", 12); pdf.cell(0, 6, "Keep this in view", ln=True)
-        pdf.set_font("Arial", "I", 11)
+        pdf.set_font("", "B", 12); pdf.cell(0, 6, T("Keep this in view"), ln=True)
+        pdf.set_font("", "I", 11)
         if sections.get("affirmation"):
-            pdf.multi_cell(0, 6, safe_text(f"Affirmation: {sections['affirmation']}"))
+            pdf.multi_cell(0, 6, T(f"Affirmation: {sections['affirmation']}"))
         if sections.get("quote"):
             qtext = f"\"{sections['quote']}\""
-            pdf.multi_cell(0, 6, safe_text(qtext))
+            pdf.multi_cell(0, 6, T(qtext))
         pdf.ln(2)
 
     if free_responses:
-        pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Your words we heard", ln=True)
-        pdf.set_font("Arial", "", 12)
+        pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Your words we heard"), ln=True)
+        pdf.set_font("", "", 12)
         for fr in free_responses:
             if not fr.get("answer"):
                 continue
-            pdf.multi_cell(0, 6, safe_text(f"• {fr.get('question','')}"))
-            pdf.multi_cell(0, 6, safe_text(f"  {fr.get('answer','')}"))
+            pdf.multi_cell(0, 6, T(f"• {fr.get('question','')}"))
+            pdf.multi_cell(0, 6, T(f"  {fr.get('answer','')}"))
             pdf.ln(1)
 
     pdf.ln(3)
-    pdf.set_font("Arial", "B", 12)
-    pdf.multi_cell(0, 6, safe_text("On the next page: a printable 'Signature Week — At a glance' checklist you can use right away."))
+    pdf.set_font("", "B", 12)
+    pdf.multi_cell(0, 6, T("On the next page: a printable 'Signature Week — At a glance' checklist you can use right away."))
 
     pdf.add_page()
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, safe_text("Signature Week — At a glance"), ln=True)
-    pdf.set_font("Arial", "", 12)
-    pdf.multi_cell(0, 6, safe_text("A simple plan you can print or screenshot. Check items off as you go."))
+    pdf.set_font("", "B", 16)
+    pdf.cell(0, 10, T("Signature Week — At a glance"), ln=True)
+    pdf.set_font("", "", 12)
+    pdf.multi_cell(0, 6, T("A simple plan you can print or screenshot. Check items off as you go."))
     pdf.ln(2)
 
     week_items = sections.get("weekly_plan") or []
@@ -669,11 +711,11 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         y = pdf.get_y()
         pdf.rect(x, y + 1.5, 4, 4)
         pdf.set_x(x + 6)
-        pdf.multi_cell(0, 6, safe_text(f"Day {i+1}: {item}"))
+        pdf.multi_cell(0, 6, T(f"Day {i+1}: {item}"))
 
     pdf.ln(2)
-    pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, safe_text("Tiny Progress Tracker"), ln=True)
-    pdf.set_font("Arial", "", 12)
+    pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Tiny Progress Tracker"), ln=True)
+    pdf.set_font("", "", 12)
     milestones = sections.get("actions") or [
         "Choose one tiny step and schedule it.",
         "Tell a friend your plan for gentle accountability.",
@@ -684,12 +726,17 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         y = pdf.get_y()
         pdf.rect(x, y + 1.5, 4, 4)
         pdf.set_x(x + 6)
-        pdf.multi_cell(0, 6, safe_text(m))
+        pdf.multi_cell(0, 6, T(m))
     pdf.ln(2)
 
-    pdf.set_font("Arial", "I", 10); pdf.ln(2)
-    pdf.multi_cell(0, 5, safe_text("Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice."))
-    return pdf.output(dest="S").encode("latin-1")
+    pdf.set_font("", "I", 10); pdf.ln(2)
+    pdf.multi_cell(0, 5, T("Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice."))
+
+    # fpdf2 returns bytes for dest="S"; if str, encode
+    raw = pdf.output(dest="S")
+    if isinstance(raw, str):
+        raw = raw.encode("latin-1")
+    return raw
 
 # ---------------- UI ----------------
 st.title(APP_TITLE)
@@ -716,7 +763,7 @@ with st.expander("AI status (debug)", expanded=False):
         except Exception as e:
             st.error(f"OpenAI error: {e}")
 
-# Step 1: First name
+# First name gate
 with st.form("intro_form"):
     first_name = st.text_input("First name", placeholder="e.g., Alex")
     started = st.form_submit_button("Start")
@@ -737,7 +784,7 @@ if st.session_state.get("first_name"):
 
     with st.expander("Personalization options"):
         horizon_weeks = st.slider("Future snapshot horizon (weeks)", 2, 8, 4)
-    st.session_state["depth"] = "high"  # always High for deluxe
+    st.session_state["depth"] = "high"
 
     for q in questions:
         st.subheader(q["text"])
@@ -781,7 +828,6 @@ if st.session_state.get("first_name"):
                 st.session_state["request_report"] = True
                 st.toast("Generating your report…", icon="⏳")
 
-    # Do the work after form submit (survives rerun)
     if st.session_state.get("request_report"):
         st.session_state["request_report"] = False
 
@@ -798,7 +844,6 @@ if st.session_state.get("first_name"):
                 horizon_weeks=horizon_weeks,
                 depth_mode="High",
             )
-            # Debug box + token tracker
             dbg = st.session_state.get("ai_debug") or {}
             tok = st.session_state.get("token_usage") or {}
             with st.expander("AI generation details (debug)", expanded=False):
