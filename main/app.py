@@ -17,9 +17,7 @@ THEMES = ["Identity", "Growth", "Connection", "Peace", "Adventure", "Contributio
 
 st.set_page_config(page_title=APP_TITLE, page_icon="✨", layout="centered")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Secrets helper: prefer st.secrets, fall back to env
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------- Secrets helper ----------------
 def get_secret(name: str, default: str = "") -> str:
     try:
         if name in st.secrets:
@@ -43,9 +41,7 @@ MAX_TOK_HIGH = _to_int(get_secret("MAX_OUTPUT_TOKENS_HIGH", "7000"), 7000)
 FALLBACK_CAP = _to_int(get_secret("MAX_OUTPUT_TOKENS_FALLBACK", "6000"), 6000)
 USE_AI = bool(OPENAI_API_KEY)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Diagnostics (temporary)
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------- Diagnostics (temporary) ----------------
 with st.expander("🔧 Diagnostics (temporary)", expanded=True):
     st.write("Python:", sys.version.split()[0])
     st.write("__file__:", __file__)
@@ -56,18 +52,14 @@ with st.expander("🔧 Diagnostics (temporary)", expanded=True):
         st.write([p.name for p in here.iterdir()])
     except Exception as e:
         st.write("Dir list failed:", e)
-
     try:
         import openai as _oai
         st.write("openai SDK version:", getattr(_oai, "__version__", "unknown"))
     except Exception as e:
         st.write("openai import error:", e)
-
     masked = (OPENAI_API_KEY[:4] + "…" + OPENAI_API_KEY[-4:]) if OPENAI_API_KEY else "None"
     st.write("OPENAI_API_KEY detected:", bool(OPENAI_API_KEY), "| key:", masked if OPENAI_API_KEY else "—")
     st.write("Model:", HIGH_MODEL, "| MAX_TOK_HIGH:", MAX_TOK_HIGH, "| FALLBACK_CAP:", FALLBACK_CAP)
-
-    # Quick probe to confirm questions.json is reachable
     if st.button("Probe: load questions.json"):
         p = here / "questions.json"
         st.write("Path:", str(p), "| exists:", p.exists())
@@ -78,9 +70,7 @@ with st.expander("🔧 Diagnostics (temporary)", expanded=True):
             except Exception as e:
                 st.error(f"JSON load error: {e}")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Data loading
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------- Data loading ----------------
 def load_questions(filename: str = "questions.json") -> Tuple[List[dict], List[str]]:
     base_dir = Path(__file__).parent
     path = base_dir / filename
@@ -97,9 +87,7 @@ def load_questions(filename: str = "questions.json") -> Tuple[List[dict], List[s
         data = json.load(f)
     return data["questions"], data.get("themes", [])
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Logo loader (webp -> png without alpha for FPDF 1.x)
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------- Logo loader (WEBP->PNG) ----------------
 def get_logo_png_path() -> Optional[str]:
     here = Path(__file__).parent
     candidates = [
@@ -124,9 +112,7 @@ def get_logo_png_path() -> Optional[str]:
                     return None
     return None
 
-# ──────────────────────────────────────────────────────────────────────────────
-# PDF text safety (Latin-1)
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------- PDF text safety (Latin-1) ----------------
 def safe_text(s: str) -> str:
     if s is None:
         return ""
@@ -142,108 +128,109 @@ def safe_text(s: str) -> str:
     s = unicodedata.normalize("NFKD", s).encode("latin-1", "ignore").decode("latin-1")
     return s
 
-# ──────────────────────────────────────────────────────────────────────────────
-# OpenAI compatibility wrapper (supports new/old params)
-# ──────────────────────────────────────────────────────────────────────────────
-def _call_openai_json(model: str, system: str, user: str, max_tokens: int, temperature: float = 0.7):
+# ---------------- OpenAI compatibility wrapper ----------------
+def _call_openai_json(model: str, system: str, user: str, cap: int, temperature: float = 0.7):
     """
-    Tries multiple paths so we're compatible with differing SDKs:
-      1) Responses API with response_format + max_output_tokens
-      2) Responses API without response_format
-      3) Chat Completions with response_format + max_completion_tokens (newer)
-      4) Chat Completions with response_format + max_tokens (legacy)
-      5) Chat Completions without response_format + max_completion_tokens
-      6) Chat Completions without response_format + max_tokens
+    Robust OpenAI call that tries modern paths first:
+      A) Responses API with system + response_format + max_output_tokens
+      B) Responses API with system + max_output_tokens (no response_format)
+      C) Responses API with merged text (no system) + response_format
+      D) Chat Completions with response_format + max_completion_tokens
+      E) Chat Completions with max_completion_tokens (no response_format)
+      F) LAST RESORT: Chat Completions with legacy max_tokens
     Returns: (raw_text, usage_or_None, path_label)
     """
     from openai import OpenAI
     client = OpenAI()
-    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
-    # 1) Responses + response_format
+    # A) Responses API (best): system + JSON object + max_output_tokens
     try:
         r = client.responses.create(
             model=model,
-            input=messages,
+            system=system,
+            input=user,
             temperature=temperature,
-            max_output_tokens=max_tokens,
+            max_output_tokens=cap,
             response_format={"type": "json_object"},
         )
-        return (r.output_text, getattr(r, "usage", None), "responses+rf")
-    except TypeError as te:
-        if "response_format" not in str(te):
-            raise
+        return (r.output_text, getattr(r, "usage", None), "responses+system+rf")
     except Exception:
         pass
 
-    # 2) Responses (no response_format)
+    # B) Responses API (no response_format)
     try:
         r = client.responses.create(
             model=model,
-            input=messages,
+            system=system,
+            input=user,
             temperature=temperature,
-            max_output_tokens=max_tokens,
+            max_output_tokens=cap,
         )
-        return (r.output_text, getattr(r, "usage", None), "responses")
+        return (r.output_text, getattr(r, "usage", None), "responses+system")
     except Exception:
         pass
 
-    # 3) Chat + rf + max_completion_tokens
+    # C) Responses API with merged prompt
+    try:
+        merged = f"SYSTEM:\n{system}\n\nUSER:\n{user}"
+        r = client.responses.create(
+            model=model,
+            input=merged,
+            temperature=temperature,
+            max_output_tokens=cap,
+            response_format={"type": "json_object"},
+        )
+        return (r.output_text, getattr(r, "usage", None), "responses+merged+rf")
+    except Exception:
+        pass
+
+    # D) Chat Completions: response_format + max_completion_tokens
     try:
         r = client.chat.completions.create(
             model=model,
-            messages=messages,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
             temperature=temperature,
-            max_completion_tokens=max_tokens,
+            max_completion_tokens=cap,
             response_format={"type": "json_object"},
         )
         content = r.choices[0].message.content if r.choices else ""
         return (content, getattr(r, "usage", None), "chat+rf_mct")
-    except TypeError:
-        pass
     except Exception:
         pass
 
-    # 4) Chat + rf + max_tokens
+    # E) Chat Completions: max_completion_tokens
     try:
         r = client.chat.completions.create(
             model=model,
-            messages=messages,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
             temperature=temperature,
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"},
-        )
-        content = r.choices[0].message.content if r.choices else ""
-        return (content, getattr(r, "usage", None), "chat+rf_mt")
-    except Exception:
-        pass
-
-    # 5) Chat + max_completion_tokens
-    try:
-        r = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_completion_tokens=max_tokens,
+            max_completion_tokens=cap,
         )
         content = r.choices[0].message.content if r.choices else ""
         return (content, getattr(r, "usage", None), "chat_mct")
     except Exception:
         pass
 
-    # 6) Chat + max_tokens (last resort)
+    # F) LAST RESORT: legacy max_tokens
     r = client.chat.completions.create(
         model=model,
-        messages=messages,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
         temperature=temperature,
-        max_tokens=max_tokens,
+        max_tokens=cap,
     )
     content = r.choices[0].message.content if r.choices else ""
-    return (content, getattr(r, "usage", None), "chat_mt")
+    return (content, getattr(r, "usage", None), "chat_mt_legacy")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# AI section builder
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------- AI helper ----------------
 def pick_model(_: int, __: str) -> Tuple[str, int]:
     return HIGH_MODEL, MAX_TOK_HIGH
 
@@ -275,7 +262,7 @@ def ai_sections_and_weights(
             "  energizers (array of 4), drainers (array of 4),\n"
             "  tensions (array of 2-3 short strings), blindspot (string <= 60 words),\n"
             "  actions (array of EXACTLY 3 short bullet strings),\n"
-            "  if_then (array of EXACTLY 3 implementation-intention strings like: 'If it’s 7pm, then I…'),\n"
+            "  if_then (array of EXACTLY 3 implementation-intention strings like: 'If it is 7pm, then I...'),\n"
             "  weekly_plan (array of 7 brief day-plan strings),\n"
             "  affirmation (string <= 15 words), quote (string <= 20 words),\n"
             "  signature_metaphor (string <= 12 words), signature_sentence (string <= 20 words),\n"
@@ -283,8 +270,8 @@ def ai_sections_and_weights(
             "  future_snapshot (string, 150-220 words, second-person, present tense, written AS IF it is {h} "
             "weeks later and the person followed through),\n"
             "  from_words (object) with: themes (array of EXACTLY 3 short bullets),\n"
-            "              quotes (array of 2–3 short verbatim quotes from the user's text, <=12 words each),\n"
-            "              insight (string, 80–120 words tying their quotes to top themes),\n"
+            "              quotes (array of 2-3 short verbatim quotes from the user's text, <=12 words each),\n"
+            "              insight (string, 80-120 words tying their quotes to top themes),\n"
             "              ritual (one-liner daily ritual drawn from their words),\n"
             "              relationship_moment (one-liner if partner/family appears),\n"
             "              stress_reset (one-liner using their stated reset method),\n"
@@ -387,9 +374,7 @@ def ai_sections_and_weights(
     except Exception:
         return None
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Scoring
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------- Scoring ----------------
 def compute_scores(answers: dict, questions: list) -> Dict[str, int]:
     scores = {t: 0 for t in THEMES}
     for q in questions:
@@ -416,18 +401,16 @@ def top_themes(scores: Dict[str, int], k: int = 3) -> List[str]:
 
 def balancing_suggestion(theme: str) -> str:
     suggestions = {
-        "Identity": "Choose one tiny ritual that reflects who you’re becoming.",
+        "Identity": "Choose one tiny ritual that reflects who you are becoming.",
         "Growth": "Pick a single skill and block 15 minutes to practice today.",
         "Connection": "Send a 3-line check-in to someone who matters.",
-        "Peace": "Name a 10-minute wind-down you’ll repeat daily.",
+        "Peace": "Name a 10-minute wind-down you will repeat daily.",
         "Adventure": "Plan a 30–60 minute micro-adventure within 7 days.",
         "Contribution": "Offer one concrete act of help this week.",
     }
     return suggestions.get(theme, "Take one small, visible step this week.")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# PDF helpers
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------- PDF helpers ----------------
 def draw_scores_barchart(pdf: FPDF, scores: Dict[str, int]):
     pdf.set_font("Arial", "B", 14)
     pdf.cell(0, 8, safe_text("Your Theme Snapshot"), ln=True)
@@ -636,7 +619,7 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         if sections.get("affirmation"):
             pdf.multi_cell(0, 6, safe_text(f"Affirmation: {sections['affirmation']}"))
         if sections.get("quote"):
-            qtext = f'"{sections["quote"]}"'
+            qtext = f"\"{sections['quote']}\""
             pdf.multi_cell(0, 6, safe_text(qtext))
         pdf.ln(2)
 
@@ -652,7 +635,7 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
 
     pdf.ln(3)
     pdf.set_font("Arial", "B", 12)
-    pdf.multi_cell(0, 6, safe_text("On the next page: a printable ‘Signature Week — At a glance’ checklist you can use right away."))
+    pdf.multi_cell(0, 6, safe_text("On the next page: a printable 'Signature Week — At a glance' checklist you can use right away."))
 
     pdf.add_page()
     pdf.set_font("Arial", "B", 16)
@@ -692,9 +675,7 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
     pdf.multi_cell(0, 5, safe_text("Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice."))
     return pdf.output(dest="S").encode("latin-1")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# UI
-# ──────────────────────────────────────────────────────────────────────────────
+# ---------------- UI ----------------
 st.title(APP_TITLE)
 st.write("Answer 15 questions, add your own reflections, and instantly download a personalized PDF summary.")
 
@@ -710,7 +691,7 @@ with st.expander("AI status (debug)", expanded=False):
                 HIGH_MODEL,
                 "Return strict JSON only.",
                 'Return {"ok": true} as JSON.',
-                max_tokens=64,
+                cap=64,
                 temperature=0.0,
             )
             st.success(f"OK — via {path}. Output: {raw}")
@@ -730,9 +711,9 @@ if started and first_name:
 
 if st.session_state.get("first_name"):
     st.header("Your Questions")
-    st.caption("Each question has choices *or* you can write your own answer.")
+    st.caption("Each question has choices or you can write your own answer.")
 
-    questions, _ = load_questions()  # defaults to "questions.json"
+    questions, _ = load_questions()
     answers: Dict[str, dict] = {}
     free_responses: List[dict] = []
 
@@ -758,7 +739,6 @@ if st.session_state.get("first_name"):
         answers[q["id"]] = {"choice_idx": choice_idx, "free_text": free_text_val}
         if free_text_val:
             free_responses.append({"id": q["id"], "question": q["text"], "answer": free_text_val})
-
         st.divider()
 
     st.subheader("Email & Download")
@@ -805,7 +785,7 @@ if st.session_state.get("first_name"):
                 "Review your week and set the next tiny step.",
             ]
             fsnap = (
-                f"It's {horizon_weeks} weeks later. You’ve stayed close to what matters, "
+                f"It is {horizon_weeks} weeks later. You have stayed close to what matters, "
                 f"protecting time for {top_themes(scores)[0] if top_themes(scores) else 'what energizes you'}. "
                 "A few tiny actions, repeated, build confidence. You pause, adjust, and keep going."
             )
