@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import datetime
 import unicodedata
@@ -28,15 +29,16 @@ def get_secret(name: str, default: str = "") -> str:
 # Pull key + config (prefer secrets)
 OPENAI_API_KEY = get_secret("OPENAI_API_KEY", "")
 if OPENAI_API_KEY:
-    # OpenAI SDK reads from env var; set it here.
-    os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+    os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY  # SDK reads from env
 
-HIGH_MODEL   = get_secret("OPENAI_HIGH_MODEL", "gpt-5-mini")
+HIGH_MODEL = get_secret("OPENAI_HIGH_MODEL", "gpt-5-mini")
+
 def _to_int(s: str, fallback: int) -> int:
     try:
         return int(str(s).strip())
     except Exception:
         return fallback
+
 MAX_TOK_HIGH = _to_int(get_secret("MAX_OUTPUT_TOKENS_HIGH", "7000"), 7000)
 FALLBACK_CAP = _to_int(get_secret("MAX_OUTPUT_TOKENS_FALLBACK", "6000"), 6000)
 
@@ -101,6 +103,76 @@ def safe_text(s: str) -> str:
     s = unicodedata.normalize("NFKD", s).encode("latin-1", "ignore").decode("latin-1")
     return s
 
+# ---------- AI call compatibility wrapper ----------
+def _call_openai_json(model: str, system: str, user: str, max_tokens: int, temperature: float = 0.7):
+    """
+    Tries multiple paths so we're compatible with older/newer openai SDKs:
+      1) Responses API with response_format
+      2) Responses API without response_format
+      3) Chat Completions with response_format
+      4) Chat Completions without response_format
+
+    Returns: (raw_text, usage_or_None, path_label)
+    """
+    from openai import OpenAI
+    client = OpenAI()
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+    # 1) Responses + response_format
+    try:
+        r = client.responses.create(
+            model=model,
+            input=messages,
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+            response_format={"type": "json_object"},
+        )
+        return (r.output_text, getattr(r, "usage", None), "responses+rf")
+    except TypeError as te:
+        if "response_format" not in str(te):
+            raise
+    except Exception:
+        pass
+
+    # 2) Responses without response_format
+    try:
+        r = client.responses.create(
+            model=model,
+            input=messages,
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+        )
+        return (r.output_text, getattr(r, "usage", None), "responses")
+    except Exception:
+        pass
+
+    # 3) Chat Completions + response_format
+    try:
+        r = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+        )
+        content = r.choices[0].message.content if r.choices else ""
+        return (content, getattr(r, "usage", None), "chat+rf")
+    except TypeError as te:
+        if "response_format" not in str(te):
+            raise
+    except Exception:
+        pass
+
+    # 4) Chat Completions without response_format
+    r = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    content = r.choices[0].message.content if r.choices else ""
+    return (content, getattr(r, "usage", None), "chat")
+
 # ---------- Optional AI ----------
 def pick_model(_: int, __: str) -> Tuple[str, int]:
     """Always use High model & cap (Deluxe)."""
@@ -117,9 +189,6 @@ def ai_sections_and_weights(
     if not USE_AI:
         return None
     try:
-        from openai import OpenAI
-        client = OpenAI()
-
         score_lines = ", ".join([f"{k}: {v}" for k, v in scores.items()])
         packed = [
             {"id": fr["id"], "q": fr["question"], "a": str(fr.get("answer", ""))[:280]}
@@ -128,7 +197,6 @@ def ai_sections_and_weights(
         total_free_chars = sum(len(p.get("a","")) for p in packed)
         model, max_tokens = pick_model(total_free_chars, depth_mode)
 
-        # Deluxe JSON schema including "from_words" + "micro_pledge"
         prompt = (
             "You are a warm, practical life coach. Return ONLY valid JSON with keys:\n"
             "  archetype (string), core_need (string),\n"
@@ -162,44 +230,41 @@ def ai_sections_and_weights(
             "Tone: empathetic, encouraging, plain language. No medical/clinical claims. JSON only."
         ).format(h=horizon_weeks)
 
-        # Primary attempt with full cap; fallback once if needed
-        try:
-            resp = client.responses.create(
-                model=model,
-                response_format={"type": "json_object"},
-                input=[
-                    {"role": "system", "content": "Reply with helpful coaching guidance as STRICT JSON only."},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.7,
-                max_output_tokens=max_tokens,
-            )
-        except Exception:
-            resp = client.responses.create(
-                model=model,
-                response_format={"type": "json_object"},
-                input=[
-                    {"role": "system", "content": "Reply with helpful coaching guidance as STRICT JSON only."},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.7,
-                max_output_tokens=FALLBACK_CAP,
-            )
+        system = "Reply with helpful coaching guidance as STRICT JSON only."
 
+        # Primary attempt; if that fails, fallback once with lower cap
         try:
-            u = getattr(resp, "usage", None)
-            if u:
+            raw, usage, path = _call_openai_json(model, system, prompt, max_tokens, temperature=0.7)
+        except Exception:
+            raw, usage, path = _call_openai_json(model, system, prompt, FALLBACK_CAP, temperature=0.7)
+
+        # Show which path was used + usage if available
+        try:
+            if usage:
                 st.caption(
-                    f"AI model: {model} • input={getattr(u,'input_tokens','?')} "
-                    f"output={getattr(u,'output_tokens','?')} total={getattr(u,'total_tokens','?')}"
+                    f"AI ({path}) • model={model} • input={getattr(usage,'input_tokens','?')} "
+                    f"output={getattr(usage,'output_tokens','?')} total={getattr(usage,'total_tokens','?')}"
                 )
             else:
-                st.caption(f"AI model: {model} • max_output_tokens={max_tokens}")
+                st.caption(f"AI ({path}) • model={model} • max_output_tokens={max_tokens}")
         except Exception:
             pass
 
-        raw = resp.output_text or "{}"
-        data = json.loads(raw)
+        # Clean accidental code fences around JSON
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
+            raw = re.sub(r"\n```$", "", raw)
+
+        # Parse JSON (with last-ditch substring extraction)
+        try:
+            data = json.loads(raw)
+        except Exception:
+            if "{" in raw and "}" in raw:
+                raw2 = raw[raw.find("{"): raw.rfind("}") + 1]
+                data = json.loads(raw2)
+            else:
+                raise
 
         out = {
             "archetype": str(data.get("archetype", "")),
@@ -584,18 +649,17 @@ with st.expander("AI status (debug)", expanded=False):
     st.write("Max tokens:", MAX_TOK_HIGH, "(fallback", FALLBACK_CAP, ")")
     if not USE_AI:
         st.warning("No OPENAI_API_KEY found. Add it in Settings → Secrets.")
-    # Optional quick connectivity test
     if USE_AI and st.button("Test OpenAI now"):
         try:
-            from openai import OpenAI
-            client = OpenAI()
-            r = client.responses.create(
-                model=HIGH_MODEL,
-                input='Return {"ok": true} as JSON.',
-                response_format={"type": "json_object"},
-                max_output_tokens=64,
+            # Tiny probe to confirm connectivity & JSON roundtrip
+            raw, _, path = _call_openai_json(
+                HIGH_MODEL,
+                "Return strict JSON only.",
+                'Return {"ok": true} as JSON.',
+                max_tokens=64,
+                temperature=0.0,
             )
-            st.success(f"OK — model={HIGH_MODEL}, output={r.output_text}")
+            st.success(f"OK — via {path}. Output: {raw}")
         except Exception as e:
             st.error(f"OpenAI error: {e}")
 
@@ -614,151 +678,4 @@ if st.session_state.get("first_name"):
     st.header("Your Questions")
     st.caption("Each question has choices *or* you can write your own answer.")
 
-    questions, _ = load_questions("questions.json")
-    answers: Dict[str, dict] = {}
-    free_responses: List[dict] = []
-
-    # Personalization (just the horizon; depth forced to High)
-    with st.expander("Personalization options"):
-        horizon_weeks = st.slider("Future snapshot horizon (weeks)", 2, 8, 4)
-    depth_mode = "High"  # forced
-    st.session_state["depth"] = "high"
-
-    for q in questions:
-        st.subheader(q["text"])
-        options = [c["label"] for c in q["choices"]] + ["✍️ I'll write my own answer"]
-        selected = st.radio("Choose one:", options, index=None, key=f"{q['id']}_choice")
-        choice_idx = None
-        free_text_val = None
-
-        if selected == "✍️ I'll write my own answer":
-            free_text_val = st.text_area("Your answer", key=f"{q['id']}_free", height=80, placeholder="Type your own response...")
-        elif selected is not None:
-            choice_idx = options.index(selected)
-            if choice_idx == len(options) - 1:
-                choice_idx = None
-
-        answers[q["id"]] = {"choice_idx": choice_idx, "free_text": free_text_val}
-        if free_text_val:
-            free_responses.append({"id": q["id"], "question": q["text"], "answer": free_text_val})
-
-        st.divider()
-
-    # Step 3: Email & Download
-    st.subheader("Email & Download")
-    with st.form("finish_form"):
-        email = st.text_input("Your email (for your download link)", placeholder="you@example.com")
-        consent = st.checkbox("I agree to receive my results and occasional updates from Life Minus Work.")
-        ready = st.form_submit_button("Generate My Personalized Report")
-
-        if ready and (not email or not consent):
-            st.error("Please enter your email and give consent to continue.")
-
-    if ready and email and consent:
-        # Compute scores from choices
-        scores = compute_scores(answers, questions)
-
-        # AI sections + optional weights from free text
-        sections = {"summary": "", "actions": [], "weekly_plan": [], "weights": {}}
-        if USE_AI:
-            maybe = ai_sections_and_weights(
-                scores,
-                top_themes(scores),
-                free_responses,
-                st.session_state.get("first_name", ""),
-                horizon_weeks=horizon_weeks,
-                depth_mode=depth_mode,
-            )
-            if maybe:
-                sections.update(maybe)
-                if sections.get("weights"):
-                    scores = apply_free_text_weights(scores, sections["weights"])
-                sections["horizon_weeks"] = horizon_weeks
-
-        # Fallback if AI off/failed
-        if not sections.get("deep_insight"):
-            base = f"Thank you for completing the Reflection Quiz, {st.session_state.get('first_name','Friend')}."
-            actions = [
-                "Choose one tiny step you can take this week.",
-                "Tell a friend your plan—gentle accountability.",
-                "Schedule 20 minutes for reflection or journaling.",
-            ]
-            plan = [
-                "Name your intention.",
-                "15–20 minutes of learning or practice.",
-                "Reach out to someone who energizes you.",
-                "Take a calm walk or mindful pause.",
-                "Do one small adventurous thing.",
-                "Offer help or encouragement to someone.",
-                "Review your week and set the next tiny step.",
-            ]
-            fsnap = (
-                f"It's {horizon_weeks} weeks later. You’ve stayed close to what matters, "
-                f"protecting time for {top_themes(scores)[0] if top_themes(scores) else 'what energizes you'}. "
-                "A few tiny actions, repeated, build confidence. You pause, adjust, and keep going."
-            )
-            sections = {
-                "deep_insight": base,
-                "actions": actions,
-                "weekly_plan": plan,
-                "future_snapshot": fsnap,
-                "horizon_weeks": horizon_weeks,
-                "weights": {},
-                "archetype": "",
-                "core_need": "",
-                "affirmation": "",
-                "quote": "",
-                "signature_metaphor": "",
-                "signature_sentence": "",
-                "top_theme_boosters": [],
-                "pitfalls": [],
-                "tensions": [],
-                "blindspot": "",
-                "from_words": {},
-                "micro_pledge": "",
-            }
-
-        top3 = top_themes(scores, 3)
-
-        # PDF
-        logo_path = get_logo_png_path()
-        pdf_bytes = make_pdf_bytes(
-            st.session_state.get("first_name", ""),
-            email,
-            scores,
-            top3,
-            sections,
-            free_responses,
-            logo_path,
-        )
-
-        st.success("Your personalized report is ready!")
-        st.download_button(
-            "Download Your PDF Report",
-            data=pdf_bytes,
-            file_name="LifeMinusWork_Reflection_Report.pdf",
-            mime="application/pdf",
-        )
-
-        # Save to /tmp (Cloud-safe, ephemeral)
-        try:
-            import csv
-            ts = datetime.datetime.now().isoformat(timespec="seconds")
-            csv_path = "/tmp/responses.csv"
-            file_exists = Path(csv_path).exists()
-            with open(csv_path, "a", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                if not file_exists:
-                    writer.writerow(["timestamp", "first_name", "email", "scores", "top3"])
-                writer.writerow([
-                    ts,
-                    st.session_state.get("first_name", ""),
-                    email,
-                    json.dumps(scores),
-                    json.dumps(top3),
-                ])
-            st.caption("Saved to /tmp/responses.csv (Cloud-safe, ephemeral).")
-        except Exception as e:
-            st.caption(f"Could not save responses (demo only). {e}")
-else:
-    st.info("Start by entering your first name above.")
+    questions, _ = load_questions("quest
