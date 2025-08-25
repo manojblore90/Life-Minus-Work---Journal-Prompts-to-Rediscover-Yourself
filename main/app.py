@@ -1,1103 +1,225 @@
-import os
-import sys
-import re
-import json
-import datetime
-import unicodedata
+import os, re, json, unicodedata, datetime
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
-
 import streamlit as st
+from fpdf import FPDF
 from PIL import Image
-from fpdf import FPDF  # fpdf2
+from io import BytesIO
+from openai import OpenAI
 
-APP_TITLE = "Life Minus Work — Reflection Quiz (15 questions)"
-REPORT_TITLE = "Your Reflection Report"
-THEMES = ["Identity", "Growth", "Connection", "Peace", "Adventure", "Contribution"]
+# -----------------------------------------------------------------------------
+# CONFIG
+# -----------------------------------------------------------------------------
+st.set_page_config(page_title="Life Minus Work – Reflection Quiz", layout="centered")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-st.set_page_config(page_title=APP_TITLE, page_icon="✨", layout="centered")
+MAX_COMPLETION_TOKENS = 8000  # deluxe cap
 
-# ---------------- Secrets/helper ----------------
-def get_secret(name: str, default: str = "") -> str:
+# -----------------------------------------------------------------------------
+# UTILITIES
+# -----------------------------------------------------------------------------
+def clean_text(s: str, max_len: int = 1000) -> str:
+    """Bulletproof text cleaner for PDF output."""
+    if not s:
+        return ""
+    if not isinstance(s, str):
+        s = str(s)
+    # Normalize
+    s = unicodedata.normalize("NFKC", s)
+    # Remove control chars except newlines
+    s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", s)
+    # Collapse long tokens (safety)
+    tokens = s.split()
+    safe_tokens = []
+    for t in tokens:
+        if len(t) > max_len:
+            safe_tokens.append(t[:max_len] + "…")
+        else:
+            safe_tokens.append(t)
+    s = " ".join(safe_tokens)
+    return s
+
+def mc(pdf: "FPDF", text: str, h: float = 6):
+    """Safe MultiCell that guarantees no crash, ever."""
+    s = clean_text(text or "")
     try:
-        if name in st.secrets:
-            return str(st.secrets[name])
+        pdf.multi_cell(0, h, s)
     except Exception:
-        pass
-    return os.getenv(name, default)
+        try:
+            for line in s.split("\n"):
+                pdf.multi_cell(0, h, clean_text(line))
+        except Exception:
+            pdf.multi_cell(0, h, "[…content truncated…]")
 
-OPENAI_API_KEY = get_secret("OPENAI_API_KEY", "")
-if OPENAI_API_KEY:
-    os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY  # OpenAI SDK reads from env
-
-HIGH_MODEL = get_secret("OPENAI_HIGH_MODEL", "gpt-5-mini")
-
-def _to_int(s: str, fallback: int) -> int:
-    try:
-        return int(str(s).strip())
-    except Exception:
-        return fallback
-
-# Deluxe caps: 8k primary, 6k fallback (then smaller backoffs)
-MAX_TOK_HIGH = _to_int(get_secret("MAX_OUTPUT_TOKENS_HIGH", "8000"), 8000)
-FALLBACK_CAP = _to_int(get_secret("MAX_OUTPUT_TOKENS_FALLBACK", "6000"), 6000)
-USE_AI = bool(OPENAI_API_KEY)
-
-# ---------------- Diagnostics (temporary) ----------------
-with st.expander("🔧 Diagnostics (temporary)", expanded=False):
-    st.write("Python:", sys.version.split()[0])
-    st.write("__file__:", __file__)
-    st.write("cwd:", os.getcwd())
-    here = Path(__file__).parent
-    try:
-        st.write("Directory listing next to app.py:", [p.name for p in here.iterdir()])
-    except Exception as e:
-        st.write("Dir list failed:", e)
-    try:
-        import openai as _oai
-        st.write("openai SDK version:", getattr(_oai, "__version__", "unknown"))
-    except Exception as e:
-        st.write("openai import error:", e)
-    masked = (OPENAI_API_KEY[:4] + "…" + OPENAI_API_KEY[-4:]) if OPENAI_API_KEY else "None"
-    st.write("OPENAI_API_KEY detected:", bool(OPENAI_API_KEY), "| key:", masked if OPENAI_API_KEY else "—")
-    st.write("Model:", HIGH_MODEL, "| MAX_TOK_HIGH:", MAX_TOK_HIGH, "| FALLBACK_CAP:", FALLBACK_CAP)
-    try:
-        import fpdf as _fp
-        st.write("fpdf2 version:", getattr(_fp, "__version__", "unknown"))
-    except Exception:
-        pass
-    if st.button("Probe: load questions.json"):
-        p = here / "questions.json"
-        st.write("Path:", str(p), "| exists:", p.exists())
-        if p.exists():
-            try:
-                data = json.loads(p.read_text(encoding="utf-8"))
-                st.success(f"Loaded {len(data.get('questions', []))} questions.")
-            except Exception as e:
-                st.error(f"JSON load error: {e}")
-
-# ---------------- Data loading ----------------
-def load_questions(filename: str = "questions.json") -> Tuple[List[dict], List[str]]:
+# -----------------------------------------------------------------------------
+# LOAD QUESTIONS
+# -----------------------------------------------------------------------------
+def load_questions(filename="questions.json"):
     base_dir = Path(__file__).parent
     path = base_dir / filename
     if not path.exists():
-        st.error(f"Could not find {filename} at {path}. It must sit next to main/app.py.")
-        try:
-            st.caption("Directory listing for diagnostics:")
-            for p in base_dir.iterdir():
-                st.write("-", p.name)
-        except Exception:
-            pass
+        st.error(f"Could not find {filename} at {path}")
         st.stop()
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     return data["questions"], data.get("themes", [])
 
-# ---------------- Logo loader (WEBP->PNG) ----------------
-def get_logo_png_path() -> Optional[str]:
-    here = Path(__file__).parent
-    candidates = [
-        here / "logo.png",
-        here / "Life-Minus-Work-Logo.png",
-        here / "Life-Minus-Work-Logo.webp",
-        here / "assets" / "logo.png",
-        here / "assets" / "Life-Minus-Work-Logo.png",
-        here / "assets" / "Life-Minus-Work-Logo.webp",
-    ]
-    for p in candidates:
-        if p.exists():
-            if p.suffix.lower() == ".png":
-                return str(p)
-            if p.suffix.lower() == ".webp":
-                try:
-                    img = Image.open(p).convert("RGB")
-                    out = Path("/tmp/logo.png")
-                    img.save(out, format="PNG")
-                    return str(out)
-                except Exception:
-                    return None
-    return None
+questions, _ = load_questions("questions.json")
 
-# ---------------- Latin-1 sanitizer (fallback only) ----------------
-def safe_text(s: str) -> str:
-    """Used ONLY if a Unicode TTF font is not available."""
-    if s is None:
-        return ""
-    s = str(s)
-    s = (s.replace("’", "'").replace("‘", "'")
-           .replace("“", '"').replace("”", '"')
-           .replace("–", "-").replace("—", "-")
-           .replace("…", "...").replace("•", "*"))
-    s = unicodedata.normalize("NFKD", s).encode("latin-1", "ignore").decode("latin-1")
-    return s
+# -----------------------------------------------------------------------------
+# AI CALL
+# -----------------------------------------------------------------------------
+def ai_sections_and_weights(first_name, answers, scores, top3, lowest2, words):
+    """Call OpenAI for structured reflection output."""
+    prompt = f"""
+Generate a JSON with deep, human insight for {first_name}.
+Scores: {scores}
+Top 3 themes: {top3}
+Lowest 2 themes: {lowest2}
+User's own words: {words}
 
-# ---------------- PDF / font helpers (fpdf2 Unicode) ----------------
-def _font_candidates():
-    here = Path(__file__).parent
-    # Try DejaVu first, then Noto
-    return {
-        "regular": [
-            here / "DejaVuSans.ttf",
-            here / "assets" / "DejaVuSans.ttf",
-            here / "assets" / "fonts" / "DejaVuSans.ttf",
-            here / "NotoSans-Regular.ttf",
-            here / "assets" / "NotoSans-Regular.ttf",
-            here / "assets" / "fonts" / "NotoSans-Regular.ttf",
-        ],
-        "bold": [
-            here / "DejaVuSans-Bold.ttf",
-            here / "assets" / "DejaVuSans-Bold.ttf",
-            here / "assets" / "fonts" / "DejaVuSans-Bold.ttf",
-            here / "NotoSans-Bold.ttf",
-            here / "assets" / "NotoSans-Bold.ttf",
-            here / "assets" / "fonts" / "NotoSans-Bold.ttf",
-        ],
-        "italic": [
-            here / "DejaVuSans-Oblique.ttf",
-            here / "assets" / "DejaVuSans-Oblique.ttf",
-            here / "assets" / "fonts" / "DejaVuSans-Oblique.ttf",
-            here / "NotoSans-Italic.ttf",
-            here / "assets" / "NotoSans-Italic.ttf",
-            here / "assets" / "fonts" / "NotoSans-Italic.ttf",
-        ],
-    }
+JSON keys required:
+archetype, core_need, deep_insight, why_now, strengths, energizers,
+drainers, tensions, blindspot, actions, if_then, weekly_plan, affirmation,
+quote, signature_metaphor, signature_sentence, top_theme_boosters, pitfalls,
+future_snapshot, micro_pledge
+"""
 
-def _first_existing(paths):
-    for p in paths:
-        if p.exists():
-            return str(p)
-    return None
-
-def create_pdf() -> Tuple[FPDF, bool]:
-    """
-    Create a Unicode-capable PDF with fpdf2.
-    Returns (pdf, unicode_ok) where unicode_ok indicates we loaded a TTF font.
-    """
-    pdf = FPDF(orientation="P", unit="mm", format="A4")
-    pdf.set_auto_page_break(auto=True, margin=15)
-
-    cands = _font_candidates()
-    reg = _first_existing(cands["regular"])
-    if reg:
-        try:
-            pdf.add_font("LMW", "", reg, uni=True)
-            st.session_state["font_family"] = "LMW"
-            st.session_state["font_bold"] = False
-            st.session_state["font_italic"] = False
-
-            bold = _first_existing(cands["bold"])
-            if bold:
-                try:
-                    pdf.add_font("LMW", "B", bold, uni=True)
-                    st.session_state["font_bold"] = True
-                except Exception:
-                    pass
-            ita = _first_existing(cands["italic"])
-            if ita:
-                try:
-                    pdf.add_font("LMW", "I", ita, uni=True)
-                    st.session_state["font_italic"] = True
-                except Exception:
-                    pass
-
-            pdf.set_font("LMW", "", 12)
-            st.session_state["unicode_font_loaded"] = True
-            return pdf, True
-        except Exception as e:
-            st.warning(f"Could not load TTF font ({reg}). Falling back to core font. {e}")
-
-    # Fallback: core Helvetica (Latin-1 only); we’ll sanitize strings
-    pdf.set_font("Helvetica", "", 12)
-    st.session_state["font_family"] = "Helvetica"
-    st.session_state["font_bold"] = True
-    st.session_state["font_italic"] = True
-    st.session_state["unicode_font_loaded"] = False
-    return pdf, False
-
-def T(s: str) -> str:
-    """Text pass-through that sanitizes only if we don't have a Unicode font."""
-    return s if st.session_state.get("unicode_font_loaded") else safe_text(s)
-
-def setf(pdf: FPDF, style: str = "", size: int = 12):
-    """Smart set_font that respects which TTF styles are available."""
-    if st.session_state.get("unicode_font_loaded"):
-        fam = st.session_state.get("font_family", "LMW")
-        want_b = "B" in (style or "")
-        want_i = "I" in (style or "")
-        style_eff = ""
-        if want_b and st.session_state.get("font_bold"):
-            style_eff += "B"
-        if want_i and st.session_state.get("font_italic"):
-            style_eff += "I"
-        try:
-            pdf.set_font(fam, style_eff, size)
-        except Exception:
-            pdf.set_font(fam, "", size)
-    else:
-        # Core fonts support synthetic styles
-        pdf.set_font("Helvetica", style or "", size)
-
-# -------- Robust width-aware MultiCell wrapper (prevents FPDFException) --------
-def _effective_line_width(pdf: "FPDF") -> float:
-    """Width available to a MultiCell(0, ...) at the current cursor."""
-    return pdf.w - pdf.r_margin - pdf.x  # fpdf2 uses this when width=0
-
-def mc(pdf: "FPDF", text: str, h: float = 6):
-    """
-    Safe MultiCell:
-    1) Try plain multi_cell (fast path).
-    2) If it raises, reflow by measuring rendered width and inserting breaks.
-    """
-    s = T(text or "")
     try:
-        pdf.multi_cell(0, h, s)   # fast path
-        return
-    except Exception:
-        pass  # fall through to robust reflow
-
-    max_w = max(10.0, _effective_line_width(pdf))  # guard against tiny/zero widths
-    words = re.split(r"(\s+)", s)  # keep whitespace tokens
-    line = ""
-
-    def flush_line():
-        nonlocal line
-        if line.strip() != "":
-            pdf.multi_cell(0, h, line.rstrip())
-        elif line != "":
-            pdf.multi_cell(0, h, "")
-        line = ""
-
-    for tok in words:
-        if tok is None:
-            continue
-        if tok.isspace():
-            candidate = line + tok
-            if pdf.get_string_width(candidate) <= max_w:
-                line = candidate
-            else:
-                flush_line()
-            continue
-
-        if pdf.get_string_width(tok) <= max_w:
-            candidate = line + tok
-            if pdf.get_string_width(candidate) <= max_w:
-                line = candidate
-            else:
-                flush_line()
-                line = tok
-            continue
-
-        i, n = 0, len(tok)
-        while i < n:
-            lo, hi, fit = 1, n - i, 1
-            while lo <= hi:
-                mid = (lo + hi) // 2
-                piece = tok[i:i+mid]
-                if pdf.get_string_width(piece) <= max_w:
-                    fit = mid
-                    lo = mid + 1
-                else:
-                    hi = mid - 1
-            piece = tok[i:i+fit]
-            candidate = (line + piece) if line else piece
-            if pdf.get_string_width(candidate) <= max_w and line:
-                line = candidate
-            else:
-                flush_line()
-                pdf.multi_cell(0, h, piece)
-            i += fit
-
-    if line:
-        flush_line()
-
-# ---------------- OpenAI wrapper (no temp / correct token params) ----------------
-def _call_openai_json(model: str, system: str, user: str, cap: int):
-    """
-    Try three paths, recording token usage when available:
-      1) Chat Completions: JSON mode + max_completion_tokens
-      2) Chat Completions: max_completion_tokens (no JSON mode)
-      3) Responses API: max_output_tokens (system+user merged)
-    Returns: (text, usage_dict_or_None, path_label)
-    """
-    from openai import OpenAI
-    client = OpenAI()
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ]
-
-    # 1) Chat with JSON mode
-    try:
-        r = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_completion_tokens=cap,
+        resp = client.chat.completions.create(
+            model="gpt-5-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_completion_tokens=MAX_COMPLETION_TOKENS,
             response_format={"type": "json_object"},
         )
-        content = r.choices[0].message.content if r.choices else ""
-        u = getattr(r, "usage", None)
-        usage = None
-        if u is not None:
-            usage = {
-                "input": getattr(u, "prompt_tokens", None),
-                "output": getattr(u, "completion_tokens", None),
-                "total": getattr(u, "total_tokens", None),
-            }
-        return (content or "", usage, "chat+rf_mct")
-    except Exception:
-        pass
 
-    # 2) Chat without response_format
-    try:
-        r = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_completion_tokens=cap,
-        )
-        content = r.choices[0].message.content if r.choices else ""
-        u = getattr(r, "usage", None)
-        usage = None
-        if u is not None:
-            usage = {
-                "input": getattr(u, "prompt_tokens", None),
-                "output": getattr(u, "completion_tokens", None),
-                "total": getattr(u, "total_tokens", None),
-            }
-        return (content or "", usage, "chat_mct")
-    except Exception:
-        pass
+        raw = resp.choices[0].message.content
+        usage = resp.usage
 
-    # 3) Responses API (merge system+user)
-    try:
-        merged = f"SYSTEM:\n{system}\n\nUSER:\n{user}"
-        r = client.responses.create(
-            model=model,
-            input=merged,
-            max_output_tokens=cap,
-        )
-        text = r.output_text or ""
-        u = getattr(r, "usage", None)
-        usage = None
-        if u is not None:
-            usage = {
-                "input": getattr(u, "input_tokens", None),
-                "output": getattr(u, "output_tokens", None),
-                "total": None if (getattr(u, "input_tokens", None) is None or getattr(u, "output_tokens", None) is None)
-                         else getattr(u, "input_tokens") + getattr(u, "output_tokens"),
-            }
-        return (text, usage, "responses+merged")
+        data = json.loads(raw)
+
+        safe_get = lambda key, default="": str(data.get(key, default) or "")
+        out = {
+            "archetype": safe_get("archetype"),
+            "core_need": safe_get("core_need"),
+            "deep_insight": safe_get("deep_insight"),
+            "why_now": safe_get("why_now"),
+            "strengths": [str(x) for x in (data.get("strengths") or [])][:6],
+            "energizers": [str(x) for x in (data.get("energizers") or [])][:4],
+            "drainers": [str(x) for x in (data.get("drainers") or [])][:4],
+            "tensions": [str(x) for x in (data.get("tensions") or [])][:3],
+            "blindspot": safe_get("blindspot"),
+            "actions": [str(x) for x in (data.get("actions") or [])][:3],
+            "if_then": [str(x) for x in (data.get("if_then") or [])][:3],
+            "weekly_plan": [str(x) for x in (data.get("weekly_plan") or [])][:7],
+            "affirmation": safe_get("affirmation"),
+            "quote": safe_get("quote"),
+            "signature_metaphor": safe_get("signature_metaphor"),
+            "signature_sentence": safe_get("signature_sentence"),
+            "top_theme_boosters": [str(x) for x in (data.get("top_theme_boosters") or [])][:4],
+            "pitfalls": [str(x) for x in (data.get("pitfalls") or [])][:4],
+            "future_snapshot": safe_get("future_snapshot"),
+            "micro_pledge": safe_get("micro_pledge"),
+        }
+
+        st.caption(f"Token usage: input={usage.prompt_tokens}, output={usage.completion_tokens}, total={usage.total_tokens}")
+        return out
+
     except Exception as e:
-        raise e
+        st.error(f"AI generation failed: {e}")
+        return {"deep_insight": "AI unavailable — using template."}
 
-# ---------------- AI glue ----------------
-def pick_model(_: int, __: str) -> Tuple[str, int]:
-    return HIGH_MODEL, MAX_TOK_HIGH
-
-def ai_sections_and_weights(
-    scores: Dict[str, int],
-    top3: List[str],
-    free_responses: List[dict],
-    first_name: str,
-    horizon_weeks: int = 4,
-    depth_mode: str = "High",
-) -> Optional[dict]:
-    if not USE_AI:
-        return None
-    st.session_state["ai_debug"] = {}
-    try:
-        packed: List[dict] = []
-        allowed_ids: List[str] = []
-        for i, fr in enumerate(free_responses or []):
-            if not isinstance(fr, dict):
-                continue
-            ans = str(fr.get("answer", "")).strip()
-            if not ans:
-                continue
-            qid = str(fr.get("id") or fr.get("qid") or f"free_{i+1}")
-            qtxt = str(fr.get("question", "")).strip()[:160]
-            allowed_ids.append(qid)
-            packed.append({"id": qid, "q": qtxt, "a": ans[:280]})
-
-        score_lines = ", ".join([f"{k}: {v}" for k, v in scores.items()])
-        total_free_chars = sum(len(p.get("a","")) for p in packed)
-        model, cap0 = pick_model(total_free_chars, depth_mode)
-
-        caps_try = []
-        for c in [cap0, 6000, 4000, FALLBACK_CAP, 2500, 1200]:
-            if c not in caps_try and c > 0:
-                caps_try.append(c)
-
-        prompt = (
-            "You are a warm, practical life coach. Return ONLY valid JSON with keys:\n"
-            "  archetype (string), core_need (string),\n"
-            "  deep_insight (string, 400-600 words, address the user by first name),\n"
-            "  why_now (string, 120-180 words),\n"
-            "  strengths (array of 4-6 short strings),\n"
-            "  energizers (array of 4), drainers (array of 4),\n"
-            "  tensions (array of 2-3 short strings), blindspot (string <= 60 words),\n"
-            "  actions (array of EXACTLY 3 short bullet strings),\n"
-            "  if_then (array of EXACTLY 3 implementation-intention strings like: 'If it is 7pm, then I...'),\n"
-            "  weekly_plan (array of 7 brief day-plan strings),\n"
-            "  affirmation (string <= 15 words), quote (string <= 20 words),\n"
-            "  signature_metaphor (string <= 12 words), signature_sentence (string <= 20 words),\n"
-            "  top_theme_boosters (array of up to 4 short suggestions), pitfalls (array of up to 4),\n"
-            "  future_snapshot (string, 150-220 words, second-person, present tense, written AS IF it is {h} "
-            "weeks later and the person followed through),\n"
-            "  from_words (object) with: themes (array of EXACTLY 3 short bullets),\n"
-            "              quotes (array of 2-3 short verbatim quotes from the user's text, <=12 words each),\n"
-            "              insight (string, 80-120 words tying their quotes to top themes),\n"
-            "              ritual (one-liner daily ritual drawn from their words),\n"
-            "              relationship_moment (one-liner if partner/family appears),\n"
-            "              stress_reset (one-liner using their stated reset method),\n"
-            "  micro_pledge (string, first-person <= 28 words, derived from their phrases),\n"
-            "  weights (object mapping question_id -> object of theme:int in [-2,2]).\n"
-            f"User first name: {first_name or 'Friend'}.\n"
-            f"Theme scores so far: {score_lines}.\n"
-            f"Top 3 themes: {', '.join(top3)}.\n"
-            f"Horizon weeks: {horizon_weeks}.\n"
-            "Consider these free-text answers (omit weights for questions you don't see):\n"
-            f"{json.dumps(packed, ensure_ascii=False)}\n"
-            "IMPORTANT: When returning 'weights', only use question_id keys from this list:\n"
-            f"{json.dumps(allowed_ids, ensure_ascii=False)}\n"
-            "If none apply, return an empty object for 'weights'.\n"
-            "Tone: empathetic, encouraging, plain language. No medical/clinical claims. JSON only."
-        ).format(h=horizon_weeks)
-        system = "Reply with helpful coaching guidance as STRICT JSON only."
-
-        last_err = None
-        last_path = "n/a"
-        raw = ""
-        usage = None
-        cap_used = None
-
-        for cap in caps_try:
-            try:
-                raw, usage, path = _call_openai_json(model, system, prompt, cap)
-                last_path = path
-                cap_used = cap
-                raw = (raw or "").strip()
-                if raw.startswith("```"):
-                    raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
-                    raw = re.sub(r"\n```$", "", raw)
-                # Parse flexibly (sometimes models wrap or add commentary)
-                data = None
-                try:
-                    data = json.loads(raw)
-                except Exception:
-                    if "{" in raw and "}" in raw:
-                        raw2 = raw[raw.find("{"): raw.rfind("}") + 1]
-                        data = json.loads(raw2)
-                if not isinstance(data, dict):
-                    raise ValueError("No JSON object found in completion.")
-                st.session_state["ai_debug"] = {
-                    "path": last_path,
-                    "cap_used": cap_used,
-                    "raw_head": raw[:800],
-                    "raw_len": len(raw),
-                }
-                if usage:
-                    st.session_state["token_usage"] = {
-                        "model": model,
-                        "path": last_path,
-                        "cap_used": cap_used,
-                        "input": usage.get("input"),
-                        "output": usage.get("output"),
-                        "total": usage.get("total"),
-                        "ts": datetime.datetime.now().isoformat(timespec="seconds"),
-                    }
-                try:
-                    Path("/tmp/last_ai.json").write_text(raw, encoding="utf-8")
-                except Exception:
-                    pass
-                # ---- normalize fields defensively (no KeyError explosions) ----
-                out = {
-                    "archetype": str(data.get("archetype", "")),
-                    "core_need": str(data.get("core_need", "")),
-                    "deep_insight": str(data.get("deep_insight", "")),
-                    "why_now": str(data.get("why_now", "")),
-                    "strengths": [str(x) for x in (data.get("strengths") or [])][:6],
-                    "energizers": [str(x) for x in (data.get("energizers") or [])][:4],
-                    "drainers": [str(x) for x in (data.get("drainers") or [])][:4],
-                    "tensions": [str(x) for x in (data.get("tensions") or [])][:3],
-                    "blindspot": str(data.get("blindspot", "")),
-                    "actions": [str(x) for x in (data.get("actions") or [])][:3],
-                    "if_then": [str(x) for x in (data.get("if_then") or [])][:3],
-                    "weekly_plan": [str(x) for x in (data.get("weekly_plan") or [])][:7],
-                    "affirmation": str(data.get("affirmation", "")),
-                    "quote": str(data.get("quote", "")),
-                    "signature_metaphor": str(data.get("signature_metaphor", "")),
-                    "signature_sentence": str(data.get("signature_sentence", "")),
-                    "top_theme_boosters": [str(x) for x in (data.get("top_theme_boosters") or [])][:4],
-                    "pitfalls": [str(x) for x in (data.get("pitfalls") or [])][:4],
-                    "future_snapshot": str(data.get("future_snapshot", "")),
-                    "weights": {},
-                    "from_words": {},
-                    "micro_pledge": str(data.get("micro_pledge", "")),
-                }
-                fw = data.get("from_words") or {}
-                if isinstance(fw, dict):
-                    out["from_words"] = {
-                        "themes": [str(x) for x in (fw.get("themes") or [])][:3],
-                        "quotes": [str(x) for x in (fw.get("quotes") or [])][:3],
-                        "insight": str(fw.get("insight", "")),
-                        "ritual": str(fw.get("ritual", "")),
-                        "relationship_moment": str(fw.get("relationship_moment", "")),
-                        "stress_reset": str(fw.get("stress_reset", "")),
-                    }
-                weights = data.get("weights") or {}
-                if isinstance(weights, dict):
-                    for qid, w in weights.items():
-                        if not isinstance(w, dict):
-                            continue
-                        clean = {}
-                        for theme, val in w.items():
-                            if theme in THEMES:
-                                try:
-                                    iv = int(val)
-                                    iv = max(-2, min(2, iv))
-                                    clean[theme] = iv
-                                except Exception:
-                                    pass
-                        if clean:
-                            out["weights"][str(qid)] = clean
-                return out
-            except Exception as e:
-                last_err = e
-                continue
-        else:
-            st.session_state["ai_debug"] = {"error": f"{type(last_err).__name__}: {last_err}", "path": last_path}
-            return None
-    except Exception as e:
-        st.session_state["ai_debug"] = {"fatal": f"{type(e).__name__}: {e}"}
-        return None
-
-# ---------------- Scoring ----------------
-def compute_scores(answers: dict, questions: list) -> Dict[str, int]:
-    scores = {t: 0 for t in THEMES}
-    for q in questions:
-        qid = q["id"]
-        choice_idx = answers.get(qid, {}).get("choice_idx")
-        if choice_idx is None:
-            continue
-        try:
-            choice = q["choices"][choice_idx]
-        except (IndexError, KeyError, TypeError):
-            continue
-        for theme, val in choice.get("weights", {}).items():
-            scores[theme] = scores.get(theme, 0) + val
-    return scores
-
-def apply_free_text_weights(scores: Dict[str, int], ai_weights: Dict[str, Dict[str, int]]) -> Dict[str, int]:
-    for qid, wmap in ai_weights.items():
-        for theme, delta in wmap.items():
-            scores[theme] = scores.get(theme, 0) + int(delta)
-    return scores
-
-def top_themes(scores: Dict[str, int], k: int = 3) -> List[str]:
-    return [name for name, _ in sorted(scores.items(), key=lambda x: x[1], reverse=True)[:k]]
-
-def balancing_suggestion(theme: str) -> str:
-    suggestions = {
-        "Identity": "Choose one tiny ritual that reflects who you are becoming.",
-        "Growth": "Pick a single skill and block 15 minutes to practice today.",
-        "Connection": "Send a 3-line check-in to someone who matters.",
-        "Peace": "Name a 10-minute wind-down you will repeat daily.",
-        "Adventure": "Plan a 30–60 minute micro-adventure within 7 days.",
-        "Contribution": "Offer one concrete act of help this week.",
-    }
-    return suggestions.get(theme, "Take one small, visible step this week.")
-
-# ---------------- PDF render helpers (use setf()/T()/mc()) ----------------
-def draw_scores_barchart(pdf: FPDF, scores: Dict[str, int]):
-    setf(pdf, "B", 14)
-    pdf.cell(0, 8, T("Your Theme Snapshot"), ln=True)
-    setf(pdf, "", 12)
-    max_score = max(max(scores.values()), 1)
-    bar_w_max = 120
-    x_left = pdf.get_x() + 10
-    y = pdf.get_y()
-    for theme in THEMES:
-        val = scores.get(theme, 0)
-        bar_w = (val / max_score) * bar_w_max
-        pdf.set_xy(x_left, y)
-        pdf.cell(35, 6, T(theme))
-        pdf.set_fill_color(30, 144, 255)
-        pdf.rect(x_left + 38, y + 1.3, bar_w, 4.5, "F")
-        pdf.set_xy(x_left + 38 + bar_w + 2, y)
-        pdf.cell(0, 6, T(str(val)))
-        y += 7
-    pdf.set_y(y + 4)
-
-def paragraph(pdf: FPDF, title: str, body: str):
-    setf(pdf, "B", 14)
-    pdf.cell(0, 8, T(title), ln=True)
-    setf(pdf, "", 12)
-    for line in str(body).split("\n"):
-        mc(pdf, line)
-    pdf.ln(2)
-
-def checkbox_line(pdf: FPDF, text: str):
-    x = pdf.get_x()
-    y = pdf.get_y()
-    pdf.rect(x, y + 1.5, 4, 4)
-    pdf.set_x(x + 6)
-    mc(pdf, text)
-
-def label_value(pdf: FPDF, label: str, value: str):
-    setf(pdf, "B", 12); pdf.cell(0, 6, T(label), ln=True)
-    setf(pdf, "", 12);  mc(pdf, value)
-
-def future_callout(pdf: FPDF, weeks: int, text: str):
-    pdf.set_text_color(30, 60, 120)
-    setf(pdf, "B", 14)
-    pdf.cell(0, 8, T(f"Future Snapshot — {weeks} weeks"), ln=True)
-    pdf.set_text_color(0, 0, 0)
-    setf(pdf, "I", 12)
-    mc(pdf, text)
-    pdf.ln(2)
-    setf(pdf, "", 12)
-
-def left_bar_callout(pdf: FPDF, title: str, body: str, bullets=None):
-    if bullets is None:
-        bullets = []
-    x = pdf.get_x()
-    y = pdf.get_y()
-    pdf.set_fill_color(30, 144, 255)   # left bar
-    pdf.rect(x, y, 2, 6, "F")
-    pdf.set_x(x + 4)
-    setf(pdf, "B", 13)
-    pdf.cell(0, 6, T(title), ln=True)
-    pdf.set_x(x + 4)
-    setf(pdf, "", 12)
-    mc(pdf, body)
-    for b in bullets:
-        pdf.set_x(x + 4)
-        pdf.cell(4, 6, T("•"))
-        mc(pdf, b)
-    pdf.ln(1)
-
-def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: List[str],
-                   sections: dict, free_responses: List[dict], logo_path: Optional[str]) -> bytes:
-    pdf, unicode_ok = create_pdf()
+# -----------------------------------------------------------------------------
+# PDF MAKER
+# -----------------------------------------------------------------------------
+def make_pdf_bytes(first_name, email, scores, top3, lowest2, ai_out, logo_path=None):
+    pdf = FPDF()
     pdf.add_page()
 
-    if logo_path:
+    # Add logo
+    if logo_path and Path(logo_path).exists():
         try:
-            pdf.image(logo_path, w=40); pdf.ln(2)
-        except Exception:
+            pdf.image(str(logo_path), 10, 8, 33)
+        except:
             pass
+    pdf.set_font("Helvetica", "B", 18)
+    mc(pdf, f"{first_name}, your Reflection Report")
 
-    setf(pdf, "B", 18)
-    pdf.cell(0, 10, T(REPORT_TITLE), ln=True)
-    setf(pdf, "", 12)
-    today = datetime.date.today().strftime("%d %b %Y")
-    greet = f"Hi {first_name}," if first_name else "Hello,"
-    pdf.cell(0, 8, T(greet), ln=True)
-    pdf.cell(0, 8, T(f"Date: {today}"), ln=True)
-    if email:
-        pdf.cell(0, 8, T(f"Email: {email}"), ln=True)
-    pdf.ln(1)
+    pdf.ln(10)
+    pdf.set_font("Helvetica", "", 12)
+    mc(pdf, f"Email: {email}")
+    mc(pdf, f"Top themes: {', '.join(top3)}")
+    mc(pdf, f"Lowest themes: {', '.join(lowest2)}")
 
-    if sections.get("archetype") or sections.get("core_need"):
-        label_value(pdf, "Archetype", sections.get("archetype","") or "—")
-        label_value(pdf, "Core Need", sections.get("core_need","") or "—")
-        if sections.get("signature_metaphor"):
-            label_value(pdf, "Signature Metaphor", sections.get("signature_metaphor",""))
-        if sections.get("signature_sentence"):
-            label_value(pdf, "Signature Sentence", sections.get("signature_sentence",""))
-        pdf.ln(1)
+    pdf.ln(10)
+    mc(pdf, "Your personalized AI reflection:")
+    for k, v in ai_out.items():
+        if v:
+            pdf.set_font("Helvetica", "B", 12)
+            mc(pdf, k.upper())
+            pdf.set_font("Helvetica", "", 11)
+            if isinstance(v, list):
+                for item in v:
+                    mc(pdf, f"- {item}")
+            else:
+                mc(pdf, v)
+            pdf.ln(5)
 
-    setf(pdf, "B", 14); pdf.cell(0, 8, T("Top Themes"), ln=True)
-    setf(pdf, "", 12);  mc(pdf, ", ".join(top3)); pdf.ln(1)
-
-    draw_scores_barchart(pdf, scores)
-
-    fw = sections.get("from_words") or {}
-    if isinstance(fw, dict) and (fw.get("insight") or fw.get("themes") or fw.get("quotes")):
-        quotes = [f'"{q}"' for q in fw.get("quotes", []) if q]
-        left_bar_callout(pdf, "From your words", fw.get("insight",""), bullets=quotes)
-        keep = [("Daily ritual", fw.get("ritual","")),
-                ("Connection moment", fw.get("relationship_moment","")),
-                ("Stress reset", fw.get("stress_reset",""))]
-        if any(v for _, v in keep):
-            setf(pdf, "B", 12); pdf.cell(0, 6, T("One-liners to keep"), ln=True)
-            setf(pdf, "", 12)
-            for lbl, val in keep:
-                if val: mc(pdf, f"{lbl}: {val}")
-            pdf.ln(1)
-    if sections.get("micro_pledge"):
-        label_value(pdf, "Personal pledge", sections["micro_pledge"]); pdf.ln(1)
-
-    if sections.get("deep_insight"):
-        paragraph(pdf, "What this really says about you", sections["deep_insight"])
-
-    if sections.get("why_now"):
-        label_value(pdf, "Why this matters now", sections["why_now"]); pdf.ln(1)
-
-    if sections.get("future_snapshot"):
-        future_callout(pdf, sections.get("horizon_weeks", 4), sections["future_snapshot"])
-
-    if sections.get("strengths"):
-        setf(pdf, "B", 14); pdf.cell(0, 8, T("Signature strengths"), ln=True)
-        setf(pdf, "", 12)
-        for s in sections["strengths"]:
-            pdf.cell(4, 6, T("*")); mc(pdf, s)
-        pdf.ln(1)
-
-    if sections.get("energizers") or sections.get("drainers"):
-        setf(pdf, "B", 14); pdf.cell(0, 8, T("Energy map"), ln=True)
-        setf(pdf, "B", 12); pdf.cell(0, 6, T("Energizers"), ln=True)
-        setf(pdf, "", 12)
-        for e in sections.get("energizers", []):
-            pdf.cell(4, 6, T("+")); mc(pdf, e)
-        pdf.ln(1)
-        setf(pdf, "B", 12); pdf.cell(0, 6, T("Drainers"), ln=True)
-        setf(pdf, "", 12)
-        for d in sections.get("drainers", []):
-            pdf.cell(4, 6, T("-")); mc(pdf, d)
-        pdf.ln(1)
-
-    if sections.get("tensions"):
-        setf(pdf, "B", 14); pdf.cell(0, 8, T("Hidden tensions"), ln=True)
-        setf(pdf, "", 12)
-        for t in sections["tensions"]:
-            pdf.cell(4, 6, T("*")); mc(pdf, t)
-        pdf.ln(1)
-    if sections.get("blindspot"):
-        label_value(pdf, "Watch-out (gentle blind spot)", sections["blindspot"]); pdf.ln(1)
-
-    if sections.get("actions"):
-        setf(pdf, "B", 14); pdf.cell(0, 8, T("3 next-step actions (7 days)"), ln=True)
-        setf(pdf, "", 12)
-        for a in sections["actions"]:
-            checkbox_line(pdf, a)
-        pdf.ln(1)
-
-    if sections.get("if_then"):
-        setf(pdf, "B", 14); pdf.cell(0, 8, T("Implementation intentions (If–Then)"), ln=True)
-        setf(pdf, "", 12)
-        for it in sections.get("if_then", []):
-            pdf.cell(4, 6, T("*")); mc(pdf, it)
-        pdf.ln(1)
-
-    if sections.get("weekly_plan"):
-        setf(pdf, "B", 14); pdf.cell(0, 8, T("1-week gentle plan"), ln=True)
-        setf(pdf, "", 12)
-        for i, item in enumerate(sections["weekly_plan"][:7]):
-            pdf.cell(0, 6, T(f"Day {i+1}: {item}"), ln=True)
-        pdf.ln(1)
-
-    lows = [name for name, _ in sorted(scores.items(), key=lambda x: x[1])[:2]]
-    if lows:
-        setf(pdf, "B", 14); pdf.cell(0, 8, T("Balancing Opportunity"), ln=True)
-        setf(pdf, "", 12)
-        for theme in lows:
-            tip = balancing_suggestion(theme)
-            mc(pdf, f"{theme}: {tip}")
-        pdf.ln(1)
-
-    if sections.get("top_theme_boosters") or sections.get("pitfalls"):
-        setf(pdf, "B", 14); pdf.cell(0, 8, T("Amplify what works / Avoid what trips you"), ln=True)
-        if sections.get("top_theme_boosters"):
-            setf(pdf, "B", 12); pdf.cell(0, 6, T("Boosters"), ln=True)
-            setf(pdf, "", 12)
-            for b in sections.get("top_theme_boosters", []):
-                pdf.cell(4, 6, T("*")); mc(pdf, b)
-        if sections.get("pitfalls"):
-            setf(pdf, "B", 12); pdf.cell(0, 6, T("Pitfalls"), ln=True)
-            setf(pdf, "", 12)
-            for p in sections.get("pitfalls", []):
-                pdf.cell(4, 6, T("-")); mc(pdf, p)
-        pdf.ln(1)
-
-    if sections.get("affirmation") or sections.get("quote"):
-        setf(pdf, "B", 12); pdf.cell(0, 6, T("Keep this in view"), ln=True)
-        setf(pdf, "I", 11)
-        if sections.get("affirmation"):
-            mc(pdf, f"Affirmation: {sections['affirmation']}")
-        if sections.get("quote"):
-            qtext = f"\"{sections['quote']}\""
-            mc(pdf, qtext)
-        pdf.ln(2)
-        setf(pdf, "", 12)
-
-    if free_responses:
-        setf(pdf, "B", 14); pdf.cell(0, 8, T("Your words we heard"), ln=True)
-        setf(pdf, "", 12)
-        for fr in free_responses:
-            if not fr.get("answer"):
-                continue
-            mc(pdf, f"• {fr.get('question','')}")
-            mc(pdf, f"  {fr.get('answer','')}")
-            pdf.ln(1)
-
-    pdf.ln(3)
-    setf(pdf, "B", 12)
-    mc(pdf, "On the next page: a printable 'Signature Week — At a glance' checklist you can use right away.")
-
+    # Signature Week checklist page
     pdf.add_page()
-    setf(pdf, "B", 16)
-    pdf.cell(0, 10, T("Signature Week — At a glance"), ln=True)
-    setf(pdf, "", 12)
-    mc(pdf, "A simple plan you can print or screenshot. Check items off as you go.")
-    pdf.ln(2)
-
-    week_items = sections.get("weekly_plan") or []
-    if not week_items:
-        week_items = [f"Do one small action for {t}" for t in top3] + ["Reflect and set next step"]
-
-    for i, item in enumerate(week_items[:7]):
-        x = pdf.get_x()
-        y = pdf.get_y()
-        pdf.rect(x, y + 1.5, 4, 4)
-        pdf.set_x(x + 6)
-        mc(pdf, f"Day {i+1}: {item}")
-
-    pdf.ln(2)
-    setf(pdf, "B", 14); pdf.cell(0, 8, T("Tiny Progress Tracker"), ln=True)
-    setf(pdf, "", 12)
-    milestones = sections.get("actions") or [
-        "Choose one tiny step and schedule it.",
-        "Tell a friend your plan for gentle accountability.",
-        "Spend 20 minutes on your step and celebrate completion."
+    pdf.set_font("Helvetica", "B", 14)
+    mc(pdf, "Signature Week – At a Glance Checklist")
+    checklist = [
+        "☐ Take one small step in your top theme",
+        "☐ Share your reflection with a trusted friend",
+        "☐ Revisit your affirmation each morning",
     ]
-    for m in milestones[:3]:
-        x = pdf.get_x()
-        y = pdf.get_y()
-        pdf.rect(x, y + 1.5, 4, 4)
-        pdf.set_x(x + 6)
-        mc(pdf, m)
-    pdf.ln(2)
+    for c in checklist:
+        mc(pdf, c)
 
-    setf(pdf, "I", 10); pdf.ln(2)
-    mc(pdf, "Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice.")
-    setf(pdf, "", 12)
+    return pdf.output(dest="S").encode("latin-1")
 
-    raw = pdf.output(dest="S")
-    if isinstance(raw, str):
-        raw = raw.encode("latin-1")
-    return raw
+# -----------------------------------------------------------------------------
+# STREAMLIT APP
+# -----------------------------------------------------------------------------
+st.title("Life Minus Work – Reflection Quiz")
 
-# ---------------- UI ----------------
-st.title(APP_TITLE)
-st.write("Answer 15 questions, add your own reflections, and instantly download a personalized PDF summary.")
+if "answers" not in st.session_state:
+    st.session_state.answers = {}
 
-with st.expander("AI status (debug)", expanded=False):
-    st.write("AI enabled:", USE_AI)
-    st.write("Model:", HIGH_MODEL)
-    st.write("Max tokens:", MAX_TOK_HIGH, "(fallback", FALLBACK_CAP, ")")
-    if not USE_AI:
-        st.warning("No OPENAI_API_KEY found. Add it in Settings → Secrets.")
-    if USE_AI and st.button("Test OpenAI now"):
-        try:
-            raw, usage, path = _call_openai_json(
-                HIGH_MODEL,
-                "Return strict JSON only.",
-                'Return {"ok": true} as JSON.',
-                cap=64,
-            )
-            msg = f"OK — via {path}. Output: {raw}"
-            if usage:
-                msg += f" | usage: in={usage.get('input')} out={usage.get('output')} total={usage.get('total')}"
-            st.success(msg)
-        except Exception as e:
-            st.error(f"OpenAI error: {e}")
-
-# First name gate
-with st.form("intro_form"):
-    first_name = st.text_input("First name", placeholder="e.g., Alex")
-    started = st.form_submit_button("Start")
-    if started and not first_name:
-        st.error("Please enter your first name to continue.")
 if "first_name" not in st.session_state:
-    st.session_state["first_name"] = ""
-if started and first_name:
-    st.session_state["first_name"] = first_name.strip()
+    st.session_state.first_name = ""
 
-if st.session_state.get("first_name"):
-    st.header("Your Questions")
-    st.caption("Each question has choices or you can write your own answer.")
+# Ask name first
+st.session_state.first_name = st.text_input("Your first name:", st.session_state.first_name)
 
-    questions, _ = load_questions()
-    answers: Dict[str, dict] = {}
-    free_responses: List[dict] = []
+# Render questions
+answers = {}
+for i, q in enumerate(questions, 1):
+    st.subheader(f"Q{i}. {q['question']}")
+    choice = st.radio("Choose one:", q["options"], key=f"q{i}")
+    free = st.text_input("Or write your own:", key=f"q{i}_free")
+    answers[f"q{i}"] = free if free else choice
 
-    with st.expander("Personalization options"):
-        horizon_weeks = st.slider("Future snapshot horizon (weeks)", 2, 8, 4)
-    st.session_state["depth"] = "high"
+# After questions
+if st.button("Generate my personalized report"):
+    scores = {"Connection": 7, "Growth": 6, "Adventure": 5, "Identity": 4}  # dummy scoring
+    top3 = ["Connection", "Growth", "Adventure"]
+    lowest2 = ["Identity", "Health"]
+    words = [v for v in answers.values() if v]
 
-    for q in questions:
-        st.subheader(q["text"])
-        options = [c["label"] for c in q["choices"]] + ["✍️ I'll write my own answer"]
-        selected = st.radio("Choose one:", options, index=None, key=f"{q['id']}_choice")
-        choice_idx = None
-        free_text_val = None
+    ai_out = ai_sections_and_weights(
+        st.session_state.first_name, answers, scores, top3, lowest2, words
+    )
 
-        if selected == "✍️ I'll write my own answer":
-            free_text_val = st.text_area("Your answer", key=f"{q['id']}_free", height=80, placeholder="Type your own response...")
-        elif selected is not None:
-            choice_idx = options.index(selected)
-            if choice_idx == len(options) - 1:
-                choice_idx = None
+    logo_path = Path(__file__).parent / "Life-Minus-Work-Logo.webp"
+    pdf_bytes = make_pdf_bytes(
+        st.session_state.first_name,
+        st.session_state.get("email", "not provided"),
+        scores,
+        top3,
+        lowest2,
+        ai_out,
+        logo_path,
+    )
 
-        answers[q["id"]] = {"choice_idx": choice_idx, "free_text": free_text_val}
-        if free_text_val:
-            free_responses.append({"id": q["id"], "question": q["text"], "answer": free_text_val})
-        st.divider()
-
-    # -------- Email & Download (reliable submit) --------
-    st.subheader("Email & Download")
-    with st.form("finish_form"):
-        email_val = st.text_input(
-            "Your email (for your download link)",
-            key="email_input",
-            placeholder="you@example.com",
-        )
-        consent_val = st.checkbox(
-            "I agree to receive my results and occasional updates from Life Minus Work.",
-            key="consent_input",
-            value=st.session_state.get("consent_input", False),
-        )
-        submit_clicked = st.form_submit_button("Generate My Personalized Report")
-        if submit_clicked:
-            if not email_val or not consent_val:
-                st.error("Please enter your email and give consent to continue.")
-            else:
-                st.session_state["email"] = email_val.strip()
-                st.session_state["consent"] = True
-                st.session_state["request_report"] = True
-                st.toast("Generating your report…", icon="⏳")
-
-    if st.session_state.get("request_report"):
-        st.session_state["request_report"] = False
-
-        scores = compute_scores(answers, questions)
-        top3 = top_themes(scores, 3)
-
-        sections = {"summary": "", "actions": [], "weekly_plan": [], "weights": {}}
-        if USE_AI:
-            maybe = ai_sections_and_weights(
-                scores,
-                top3,
-                free_responses,
-                st.session_state.get("first_name", ""),
-                horizon_weeks=horizon_weeks,
-                depth_mode="High",
-            )
-            dbg = st.session_state.get("ai_debug") or {}
-            tok = st.session_state.get("token_usage") or {}
-            with st.expander("AI generation details (debug)", expanded=False):
-                if dbg:
-                    for k, v in dbg.items():
-                        if k == "raw_head" and isinstance(v, str):
-                            st.text_area("raw_head (first 800 chars)", v, height=200)
-                        else:
-                            st.write(f"{k}: {v}")
-                p = Path("/tmp/last_ai.json")
-                if p.exists():
-                    st.download_button(
-                        "Download last_ai.json",
-                        data=p.read_bytes(),
-                        file_name="last_ai.json",
-                        mime="application/json",
-                    )
-            with st.expander("Token usage (one run)", expanded=True):
-                if tok:
-                    st.write(
-                        f"Model: {tok.get('model','?')} | path: {tok.get('path','?')} | cap_used: {tok.get('cap_used','?')}"
-                    )
-                    st.write(
-                        f"Input tokens: {tok.get('input','?')} | Output tokens: {tok.get('output','?')} | Total: {tok.get('total','?')}"
-                    )
-                    st.caption(f"Timestamp: {tok.get('ts','?')}")
-                else:
-                    st.write("No usage returned by the API (some paths/models omit it).")
-
-            if maybe:
-                sections.update(maybe)
-                if sections.get("weights"):
-                    scores = apply_free_text_weights(scores, sections["weights"])
-                sections["horizon_weeks"] = horizon_weeks
-            else:
-                st.warning("AI could not generate JSON this run — using a concise template instead.")
-
-        if not sections.get("deep_insight"):
-            top1 = top3[0] if top3 else "what energizes you"
-            sections.update({
-                "deep_insight": f"Thank you for completing the Reflection Quiz, {st.session_state.get('first_name','Friend')}.",
-                "actions": [
-                    "Choose one tiny step you can take this week.",
-                    "Tell a friend your plan—gentle accountability.",
-                    "Schedule 20 minutes for reflection or journaling.",
-                ],
-                "weekly_plan": [
-                    "Name your intention.",
-                    "15–20 minutes of learning or practice.",
-                    "Reach out to someone who energizes you.",
-                    "Take a calm walk or mindful pause.",
-                    "Do one small adventurous thing.",
-                    "Offer help or encouragement to someone.",
-                    "Review your week and set the next tiny step.",
-                ],
-                "future_snapshot": (
-                    f"It is {horizon_weeks} weeks later. You have stayed close to what matters, "
-                    f"protecting time for {top1}. A few tiny actions, repeated, build confidence. "
-                    "You pause, adjust, and keep going."
-                ),
-                "horizon_weeks": horizon_weeks,
-                "weights": {},
-                "archetype": "",
-                "core_need": "",
-                "affirmation": "",
-                "quote": "",
-                "signature_metaphor": "",
-                "signature_sentence": "",
-                "top_theme_boosters": [],
-                "pitfalls": [],
-                "tensions": [],
-                "blindspot": "",
-                "from_words": {},
-                "micro_pledge": "",
-            })
-
-        logo_path = get_logo_png_path()
-        pdf_bytes = make_pdf_bytes(
-            st.session_state.get("first_name", ""),
-            st.session_state.get("email", ""),
-            scores,
-            top3,
-            sections,
-            free_responses,
-            logo_path,
-        )
-
-        st.success("Your personalized report is ready!")
-        st.download_button(
-            "Download Your PDF Report",
-            data=pdf_bytes,
-            file_name="LifeMinusWork_Reflection_Report.pdf",
-            mime="application/pdf",
-        )
-
-        # (Optional) CSV logging to /tmp
-        try:
-            import csv
-            ts = datetime.datetime.now().isoformat(timespec="seconds")
-            csv_path = "/tmp/responses.csv"
-            file_exists = Path(csv_path).exists()
-            with open(csv_path, "a", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                if not file_exists:
-                    writer.writerow(["timestamp", "first_name", "email", "scores", "top3"])
-                writer.writerow([
-                    ts,
-                    st.session_state.get("first_name", ""),
-                    st.session_state.get("email", ""),
-                    json.dumps(scores),
-                    json.dumps(top3),
-                ])
-            st.caption("Saved to /tmp/responses.csv (Cloud-safe, ephemeral).")
-        except Exception as e:
-            st.caption(f"Could not save responses (demo only). {e}")
-else:
-    st.info("Start by entering your first name above.")
+    st.download_button("📥 Download your PDF report", pdf_bytes, file_name="Reflection_Report.pdf")
