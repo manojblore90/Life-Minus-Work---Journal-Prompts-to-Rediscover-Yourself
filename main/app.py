@@ -128,49 +128,50 @@ def safe_text(s: str) -> str:
     s = unicodedata.normalize("NFKD", s).encode("latin-1", "ignore").decode("latin-1")
     return s
 
-# ---------------- OpenAI compatibility wrapper ----------------
+# ---------------- OpenAI wrapper (no legacy max_tokens) ----------------
 def _call_openai_json(model: str, system: str, user: str, cap: int, temperature: float = 0.7):
     """
-    Robust OpenAI call that tries modern paths first:
-      A) Responses API with system + response_format + max_output_tokens
-      B) Responses API with system + max_output_tokens (no response_format)
-      C) Responses API with merged text (no system) + response_format
-      D) Chat Completions with response_format + max_completion_tokens
-      E) Chat Completions with max_completion_tokens (no response_format)
-      F) LAST RESORT: Chat Completions with legacy max_tokens
-    Returns: (raw_text, usage_or_None, path_label)
+    Use modern params only:
+      1) Chat Completions: response_format + max_completion_tokens
+      2) Chat Completions: max_completion_tokens (no response_format)
+      3) Responses API: max_output_tokens (merged system+user)
+    Returns: (text, usage_or_None, path_label)
     """
     from openai import OpenAI
     client = OpenAI()
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
 
-    # A) Responses API (best): system + JSON object + max_output_tokens
+    # 1) Chat with JSON mode + max_completion_tokens
     try:
-        r = client.responses.create(
+        r = client.chat.completions.create(
             model=model,
-            system=system,
-            input=user,
+            messages=messages,
             temperature=temperature,
-            max_output_tokens=cap,
+            max_completion_tokens=cap,
             response_format={"type": "json_object"},
         )
-        return (r.output_text, getattr(r, "usage", None), "responses+system+rf")
+        content = r.choices[0].message.content if r.choices else ""
+        return (content or "", getattr(r, "usage", None), "chat+rf_mct")
     except Exception:
         pass
 
-    # B) Responses API (no response_format)
+    # 2) Chat with max_completion_tokens (no response_format)
     try:
-        r = client.responses.create(
+        r = client.chat.completions.create(
             model=model,
-            system=system,
-            input=user,
+            messages=messages,
             temperature=temperature,
-            max_output_tokens=cap,
+            max_completion_tokens=cap,
         )
-        return (r.output_text, getattr(r, "usage", None), "responses+system")
+        content = r.choices[0].message.content if r.choices else ""
+        return (content or "", getattr(r, "usage", None), "chat_mct")
     except Exception:
         pass
 
-    # C) Responses API with merged prompt
+    # 3) Responses API with max_output_tokens (merge system+user)
     try:
         merged = f"SYSTEM:\n{system}\n\nUSER:\n{user}"
         r = client.responses.create(
@@ -178,57 +179,11 @@ def _call_openai_json(model: str, system: str, user: str, cap: int, temperature:
             input=merged,
             temperature=temperature,
             max_output_tokens=cap,
-            response_format={"type": "json_object"},
         )
-        return (r.output_text, getattr(r, "usage", None), "responses+merged+rf")
-    except Exception:
-        pass
-
-    # D) Chat Completions: response_format + max_completion_tokens
-    try:
-        r = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=temperature,
-            max_completion_tokens=cap,
-            response_format={"type": "json_object"},
-        )
-        content = r.choices[0].message.content if r.choices else ""
-        return (content, getattr(r, "usage", None), "chat+rf_mct")
-    except Exception:
-        pass
-
-    # E) Chat Completions: max_completion_tokens
-    try:
-        r = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=temperature,
-            max_completion_tokens=cap,
-        )
-        content = r.choices[0].message.content if r.choices else ""
-        return (content, getattr(r, "usage", None), "chat_mct")
-    except Exception:
-        pass
-
-    # F) LAST RESORT: legacy max_tokens
-    r = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        temperature=temperature,
-        max_tokens=cap,
-    )
-    content = r.choices[0].message.content if r.choices else ""
-    return (content, getattr(r, "usage", None), "chat_mt_legacy")
+        return (r.output_text or "", getattr(r, "usage", None), "responses+merged")
+    except Exception as e:
+        # propagate the most informative error
+        raise e
 
 # ---------------- AI helper ----------------
 def pick_model(_: int, __: str) -> Tuple[str, int]:
@@ -251,7 +206,7 @@ def ai_sections_and_weights(
             for fr in free_responses if fr.get("answer")
         ]
         total_free_chars = sum(len(p.get("a","")) for p in packed)
-        model, max_tokens = pick_model(total_free_chars, depth_mode)
+        model, cap = pick_model(total_free_chars, depth_mode)
 
         prompt = (
             "You are a warm, practical life coach. Return ONLY valid JSON with keys:\n"
@@ -289,7 +244,7 @@ def ai_sections_and_weights(
         system = "Reply with helpful coaching guidance as STRICT JSON only."
 
         try:
-            raw, usage, path = _call_openai_json(model, system, prompt, max_tokens, temperature=0.7)
+            raw, usage, path = _call_openai_json(model, system, prompt, cap, temperature=0.7)
         except Exception:
             raw, usage, path = _call_openai_json(model, system, prompt, FALLBACK_CAP, temperature=0.7)
 
@@ -303,11 +258,11 @@ def ai_sections_and_weights(
                     tt = it + ot
                 st.caption(f"AI ({path}) • model={model} • input={it} output={ot} total={tt}")
             else:
-                st.caption(f"AI ({path}) • model={model} • max_tokens≈{max_tokens}")
+                st.caption(f"AI ({path}) • model={model} • cap≈{cap}")
         except Exception:
             pass
 
-        raw = raw.strip()
+        raw = (raw or "").strip()
         if raw.startswith("```"):
             raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
             raw = re.sub(r"\n```$", "", raw)
