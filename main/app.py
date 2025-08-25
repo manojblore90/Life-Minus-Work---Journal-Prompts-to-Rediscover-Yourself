@@ -1,3 +1,4 @@
+
 import os
 import json
 import datetime
@@ -13,8 +14,9 @@ REPORT_TITLE = "Your Reflection Report"
 THEMES = ["Identity", "Growth", "Connection", "Peace", "Adventure", "Contribution"]
 
 # Deluxe defaults (force High every time)
-HIGH_MODEL = os.getenv("OPENAI_HIGH_MODEL", "gpt-5-mini")
-MAX_TOK_HIGH = int(os.getenv("MAX_OUTPUT_TOKENS_HIGH", 15000))
+HIGH_MODEL   = os.getenv("OPENAI_HIGH_MODEL", "gpt-5-mini")
+MAX_TOK_HIGH = int(os.getenv("MAX_OUTPUT_TOKENS_HIGH", 7000))   # generous default
+FALLBACK_CAP = int(os.getenv("MAX_OUTPUT_TOKENS_FALLBACK", 6000))  # reliable fallback
 
 st.set_page_config(page_title=APP_TITLE, page_icon="✨", layout="centered")
 st.title(APP_TITLE)
@@ -55,7 +57,7 @@ def get_logo_png_path() -> Optional[str]:
                 return str(p)
             if p.suffix.lower() == ".webp":
                 try:
-                    # FPDF 1.x can't handle PNG with alpha; flatten to RGB.
+                    # FPDF 1.x can't handle alpha; flatten to RGB.
                     img = Image.open(p).convert("RGB")
                     out = Path("/tmp/logo.png")
                     img.save(out, format="PNG")
@@ -69,7 +71,6 @@ def safe_text(s: str) -> str:
     if s is None:
         return ""
     s = str(s)
-    # normalize curly punctuation
     s = (s.replace("’", "'")
          .replace("‘", "'")
          .replace("“", '"')
@@ -78,7 +79,6 @@ def safe_text(s: str) -> str:
          .replace("—", "-")
          .replace("…", "...")
          .replace("•", "*"))
-    # strip non-latin-1
     s = unicodedata.normalize("NFKD", s).encode("latin-1", "ignore").decode("latin-1")
     return s
 
@@ -108,14 +108,15 @@ def ai_sections_and_weights(
             {"id": fr["id"], "q": fr["question"], "a": str(fr.get("answer", ""))[:280]}
             for fr in free_responses if fr.get("answer")
         ]
-        total_free_chars = sum(len(p.get("a", "")) for p in packed)
+        total_free_chars = sum(len(p.get("a","")) for p in packed)
         model, max_tokens = pick_model(total_free_chars, depth_mode)
 
+        # Bumped word targets for deluxe depth
         prompt = (
             "You are a warm, practical life coach. Return ONLY valid JSON with keys:\n"
             "  archetype (string), core_need (string),\n"
-            "  deep_insight (string, 220-380 words, address the user by first name),\n"
-            "  why_now (string, 100-150 words),\n"
+            "  deep_insight (string, 400-600 words, address the user by first name),\n"
+            "  why_now (string, 120-180 words),\n"
             "  strengths (array of 4-6 short strings),\n"
             "  energizers (array of 4), drainers (array of 4),\n"
             "  tensions (array of 2-3 short strings), blindspot (string <= 60 words),\n"
@@ -125,7 +126,7 @@ def ai_sections_and_weights(
             "  affirmation (string <= 15 words), quote (string <= 20 words),\n"
             "  signature_metaphor (string <= 12 words), signature_sentence (string <= 20 words),\n"
             "  top_theme_boosters (array of up to 4 short suggestions), pitfalls (array of up to 4),\n"
-            "  future_snapshot (string, 120-160 words, second-person, present tense, written AS IF it is {h} "
+            "  future_snapshot (string, 150-220 words, second-person, present tense, written AS IF it is {h} "
             "weeks later and the person followed through),\n"
             "  weights (object mapping question_id -> object of theme:int in [-2,2]).\n"
             f"User first name: {first_name or 'Friend'}.\n"
@@ -137,23 +138,35 @@ def ai_sections_and_weights(
             "Tone: empathetic, encouraging, plain language. No medical/clinical claims. JSON only."
         ).format(h=horizon_weeks)
 
-        resp = client.responses.create(
-            model=model,
-            response_format={"type": "json_object"},
-            input=[
-                {"role": "system", "content": "Reply with helpful coaching guidance as STRICT JSON only."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.7,
-            max_output_tokens=max_tokens,
-        )
+        # Primary attempt with full cap; fallback once if needed
+        try:
+            resp = client.responses.create(
+                model=model,
+                response_format={"type": "json_object"},
+                input=[
+                    {"role": "system", "content": "Reply with helpful coaching guidance as STRICT JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+                max_output_tokens=max_tokens,
+            )
+        except Exception:
+            resp = client.responses.create(
+                model=model,
+                response_format={"type": "json_object"},
+                input=[
+                    {"role": "system", "content": "Reply with helpful coaching guidance as STRICT JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+                max_output_tokens=FALLBACK_CAP,
+            )
+
         try:
             u = getattr(resp, "usage", None)
             if u:
-                st.caption(
-                    f"AI model: {model} • usage input={getattr(u,'input_tokens','?')} "
-                    f"output={getattr(u,'output_tokens','?')} total={getattr(u,'total_tokens','?')}"
-                )
+                st.caption(f"AI model: {model} • input={getattr(u,'input_tokens','?')} "
+                           f"output={getattr(u,'output_tokens','?')} total={getattr(u,'total_tokens','?')}")
             else:
                 st.caption(f"AI model: {model} • max_output_tokens={max_tokens}")
         except Exception:
