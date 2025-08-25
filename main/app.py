@@ -175,33 +175,82 @@ def T(s: str) -> str:
     """Text pass-through that sanitizes only if we don't have a Unicode font."""
     return s if st.session_state.get("unicode_font_loaded") else safe_text(s)
 
-# -------- Long-token-safe wrapper for MultiCell (prevents FPDFException) --------
-def wrap_long_tokens(text: str, limit: int = 50) -> str:
-    """
-    If a token has no spaces and is longer than `limit`, insert spaces every `limit`
-    chars so fpdf2 can line-break safely.
-    """
-    s = str(text or "")
-    parts = re.split(r"(\s+)", s)  # keep whitespace separators
-    out = []
-    for p in parts:
-        if not p or p.isspace():
-            out.append(p)
-            continue
-        if len(p) <= limit:
-            out.append(p)
-        else:
-            chunks = [p[i:i+limit] for i in range(0, len(p), limit)]
-            out.append(" ".join(chunks))
-    return "".join(out)
+# -------- Robust width-aware MultiCell wrapper (prevents FPDFException) --------
+def _effective_line_width(pdf: "FPDF") -> float:
+    """Width available to a MultiCell(0, ...) at the current cursor."""
+    return pdf.w - pdf.r_margin - pdf.x  # fpdf2 uses this when width=0
 
-def mc(pdf: FPDF, text: str, h: float = 6):
-    """Safe multi-cell: Unicode if font loaded, else sanitize + hard-wrap long tokens."""
-    s = T(text)
+def mc(pdf: "FPDF", text: str, h: float = 6):
+    """
+    Safe MultiCell:
+    1) Try plain multi_cell (fast path).
+    2) If it raises, reflow by measuring rendered width and inserting breaks.
+    """
+    s = T(text or "")
     try:
-        pdf.multi_cell(0, h, s)
+        pdf.multi_cell(0, h, s)   # fast path
+        return
     except Exception:
-        pdf.multi_cell(0, h, T(wrap_long_tokens(s)))
+        pass  # fall through to robust reflow
+
+    max_w = max(10.0, _effective_line_width(pdf))  # guard against tiny/zero widths
+    words = re.split(r"(\s+)", s)  # keep whitespace tokens
+    line = ""
+
+    def flush_line():
+        nonlocal line
+        if line.strip() != "":
+            pdf.multi_cell(0, h, line.rstrip())
+        elif line != "":
+            # preserve blank lines if they were intentional
+            pdf.multi_cell(0, h, "")
+        line = ""
+
+    for tok in words:
+        if tok is None:
+            continue
+        # whitespace: try to append as-is
+        if tok.isspace():
+            candidate = line + tok
+            if pdf.get_string_width(candidate) <= max_w:
+                line = candidate
+            else:
+                flush_line()
+            continue
+
+        # normal token fits?
+        if pdf.get_string_width(tok) <= max_w:
+            candidate = line + tok
+            if pdf.get_string_width(candidate) <= max_w:
+                line = candidate
+            else:
+                flush_line()
+                line = tok
+            continue
+
+        # token too wide -> split by width (binary search chunks)
+        i, n = 0, len(tok)
+        while i < n:
+            lo, hi, fit = 1, n - i, 1
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                piece = tok[i:i+mid]
+                if pdf.get_string_width(piece) <= max_w:
+                    fit = mid
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            piece = tok[i:i+fit]
+            candidate = (line + piece) if line else piece
+            if pdf.get_string_width(candidate) <= max_w and line:
+                line = candidate
+            else:
+                flush_line()
+                pdf.multi_cell(0, h, piece)
+            i += fit
+
+    if line:
+        flush_line()
 
 # ---------------- OpenAI wrapper (no temp / correct token params) ----------------
 def _call_openai_json(model: str, system: str, user: str, cap: int):
