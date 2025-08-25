@@ -5,6 +5,7 @@ import datetime
 import unicodedata
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
+
 import streamlit as st
 from fpdf import FPDF
 from PIL import Image
@@ -29,7 +30,7 @@ def get_secret(name: str, default: str = "") -> str:
 # Pull key + config (prefer secrets)
 OPENAI_API_KEY = get_secret("OPENAI_API_KEY", "")
 if OPENAI_API_KEY:
-    os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY  # SDK reads from env
+    os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY  # OpenAI SDK reads from env
 
 HIGH_MODEL = get_secret("OPENAI_HIGH_MODEL", "gpt-5-mini")
 
@@ -651,7 +652,6 @@ with st.expander("AI status (debug)", expanded=False):
         st.warning("No OPENAI_API_KEY found. Add it in Settings → Secrets.")
     if USE_AI and st.button("Test OpenAI now"):
         try:
-            # Tiny probe to confirm connectivity & JSON roundtrip
             raw, _, path = _call_openai_json(
                 HIGH_MODEL,
                 "Return strict JSON only.",
@@ -678,4 +678,151 @@ if st.session_state.get("first_name"):
     st.header("Your Questions")
     st.caption("Each question has choices *or* you can write your own answer.")
 
-    questions, _ = load_questions("quest
+    questions, _ = load_questions()  # defaults to "questions.json"
+    answers: Dict[str, dict] = {}
+    free_responses: List[dict] = []
+
+    # Personalization (just the horizon; depth forced to High)
+    with st.expander("Personalization options"):
+        horizon_weeks = st.slider("Future snapshot horizon (weeks)", 2, 8, 4)
+    depth_mode = "High"  # forced
+    st.session_state["depth"] = "high"
+
+    for q in questions:
+        st.subheader(q["text"])
+        options = [c["label"] for c in q["choices"]] + ["✍️ I'll write my own answer"]
+        selected = st.radio("Choose one:", options, index=None, key=f"{q['id']}_choice")
+        choice_idx = None
+        free_text_val = None
+
+        if selected == "✍️ I'll write my own answer":
+            free_text_val = st.text_area("Your answer", key=f"{q['id']}_free", height=80, placeholder="Type your own response...")
+        elif selected is not None:
+            choice_idx = options.index(selected)
+            if choice_idx == len(options) - 1:
+                choice_idx = None
+
+        answers[q["id"]] = {"choice_idx": choice_idx, "free_text": free_text_val}
+        if free_text_val:
+            free_responses.append({"id": q["id"], "question": q["text"], "answer": free_text_val})
+
+        st.divider()
+
+    # Step 3: Email & Download
+    st.subheader("Email & Download")
+    with st.form("finish_form"):
+        email = st.text_input("Your email (for your download link)", placeholder="you@example.com")
+        consent = st.checkbox("I agree to receive my results and occasional updates from Life Minus Work.")
+        ready = st.form_submit_button("Generate My Personalized Report")
+
+        if ready and (not email or not consent):
+            st.error("Please enter your email and give consent to continue.")
+
+    if ready and email and consent:
+        # Compute scores from choices
+        scores = compute_scores(answers, questions)
+
+        # AI sections + optional weights from free text
+        sections = {"summary": "", "actions": [], "weekly_plan": [], "weights": {}}
+        if USE_AI:
+            maybe = ai_sections_and_weights(
+                scores,
+                top_themes(scores),
+                free_responses,
+                st.session_state.get("first_name", ""),
+                horizon_weeks=horizon_weeks,
+                depth_mode=depth_mode,
+            )
+            if maybe:
+                sections.update(maybe)
+                if sections.get("weights"):
+                    scores = apply_free_text_weights(scores, sections["weights"])
+                sections["horizon_weeks"] = horizon_weeks
+
+        # Fallback if AI off/failed
+        if not sections.get("deep_insight"):
+            base = f"Thank you for completing the Reflection Quiz, {st.session_state.get('first_name','Friend')}."
+            actions = [
+                "Choose one tiny step you can take this week.",
+                "Tell a friend your plan—gentle accountability.",
+                "Schedule 20 minutes for reflection or journaling.",
+            ]
+            plan = [
+                "Name your intention.",
+                "15–20 minutes of learning or practice.",
+                "Reach out to someone who energizes you.",
+                "Take a calm walk or mindful pause.",
+                "Do one small adventurous thing.",
+                "Offer help or encouragement to someone.",
+                "Review your week and set the next tiny step.",
+            ]
+            fsnap = (
+                f"It's {horizon_weeks} weeks later. You’ve stayed close to what matters, "
+                f"protecting time for {top_themes(scores)[0] if top_themes(scores) else 'what energizes you'}. "
+                "A few tiny actions, repeated, build confidence. You pause, adjust, and keep going."
+            )
+            sections = {
+                "deep_insight": base,
+                "actions": actions,
+                "weekly_plan": plan,
+                "future_snapshot": fsnap,
+                "horizon_weeks": horizon_weeks,
+                "weights": {},
+                "archetype": "",
+                "core_need": "",
+                "affirmation": "",
+                "quote": "",
+                "signature_metaphor": "",
+                "signature_sentence": "",
+                "top_theme_boosters": [],
+                "pitfalls": [],
+                "tensions": [],
+                "blindspot": "",
+                "from_words": {},
+                "micro_pledge": "",
+            }
+
+        top3 = top_themes(scores, 3)
+
+        # PDF
+        logo_path = get_logo_png_path()
+        pdf_bytes = make_pdf_bytes(
+            st.session_state.get("first_name", ""),
+            email,
+            scores,
+            top3,
+            sections,
+            free_responses,
+            logo_path,
+        )
+
+        st.success("Your personalized report is ready!")
+        st.download_button(
+            "Download Your PDF Report",
+            data=pdf_bytes,
+            file_name="LifeMinusWork_Reflection_Report.pdf",
+            mime="application/pdf",
+        )
+
+        # Save to /tmp (Cloud-safe, ephemeral)
+        try:
+            import csv
+            ts = datetime.datetime.now().isoformat(timespec="seconds")
+            csv_path = "/tmp/responses.csv"
+            file_exists = Path(csv_path).exists()
+            with open(csv_path, "a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow(["timestamp", "first_name", "email", "scores", "top3"])
+                writer.writerow([
+                    ts,
+                    st.session_state.get("first_name", ""),
+                    email,
+                    json.dumps(scores),
+                    json.dumps(top3),
+                ])
+            st.caption("Saved to /tmp/responses.csv (Cloud-safe, ephemeral).")
+        except Exception as e:
+            st.caption(f"Could not save responses (demo only). {e}")
+else:
+    st.info("Start by entering your first name above.")
