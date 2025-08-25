@@ -32,6 +32,7 @@ OPENAI_API_KEY = get_secret("OPENAI_API_KEY", "")
 if OPENAI_API_KEY:
     os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY  # OpenAI SDK reads from env
 
+# Default model if not set in secrets
 HIGH_MODEL = get_secret("OPENAI_HIGH_MODEL", "gpt-5-mini")
 
 def _to_int(s: str, fallback: int) -> int:
@@ -40,6 +41,7 @@ def _to_int(s: str, fallback: int) -> int:
     except Exception:
         return fallback
 
+# Output caps
 MAX_TOK_HIGH = _to_int(get_secret("MAX_OUTPUT_TOKENS_HIGH", "7000"), 7000)
 FALLBACK_CAP = _to_int(get_secret("MAX_OUTPUT_TOKENS_FALLBACK", "6000"), 6000)
 
@@ -104,22 +106,23 @@ def safe_text(s: str) -> str:
     s = unicodedata.normalize("NFKD", s).encode("latin-1", "ignore").decode("latin-1")
     return s
 
-# ---------- AI call compatibility wrapper ----------
+# ---------- AI call compatibility wrapper (supports openai>=1.60.0 and older styles) ----------
 def _call_openai_json(model: str, system: str, user: str, max_tokens: int, temperature: float = 0.7):
     """
-    Tries multiple paths so we're compatible with older/newer openai SDKs:
-      1) Responses API with response_format
+    Compatibility wrapper for differing OpenAI SDK/model params:
+      1) Responses API with response_format + max_output_tokens
       2) Responses API without response_format
-      3) Chat Completions with response_format
-      4) Chat Completions without response_format
-
+      3) Chat Completions with response_format + max_completion_tokens (newer)
+      4) Chat Completions with response_format + max_tokens (legacy)
+      5) Chat Completions without response_format + max_completion_tokens
+      6) Chat Completions without response_format + max_tokens
     Returns: (raw_text, usage_or_None, path_label)
     """
     from openai import OpenAI
     client = OpenAI()
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
-    # 1) Responses + response_format
+    # 1) Responses + response_format + max_output_tokens
     try:
         r = client.responses.create(
             model=model,
@@ -147,7 +150,23 @@ def _call_openai_json(model: str, system: str, user: str, max_tokens: int, tempe
     except Exception:
         pass
 
-    # 3) Chat Completions + response_format
+    # 3) Chat + response_format + max_completion_tokens (newer)
+    try:
+        r = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_completion_tokens=max_tokens,
+            response_format={"type": "json_object"},
+        )
+        content = r.choices[0].message.content if r.choices else ""
+        return (content, getattr(r, "usage", None), "chat+rf_mct")
+    except TypeError:
+        pass
+    except Exception:
+        pass
+
+    # 4) Chat + response_format + max_tokens (legacy)
     try:
         r = client.chat.completions.create(
             model=model,
@@ -157,14 +176,24 @@ def _call_openai_json(model: str, system: str, user: str, max_tokens: int, tempe
             response_format={"type": "json_object"},
         )
         content = r.choices[0].message.content if r.choices else ""
-        return (content, getattr(r, "usage", None), "chat+rf")
-    except TypeError as te:
-        if "response_format" not in str(te):
-            raise
+        return (content, getattr(r, "usage", None), "chat+rf_mt")
     except Exception:
         pass
 
-    # 4) Chat Completions without response_format
+    # 5) Chat without response_format + max_completion_tokens
+    try:
+        r = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_completion_tokens=max_tokens,
+        )
+        content = r.choices[0].message.content if r.choices else ""
+        return (content, getattr(r, "usage", None), "chat_mct")
+    except Exception:
+        pass
+
+    # 6) Chat without response_format + max_tokens
     r = client.chat.completions.create(
         model=model,
         messages=messages,
@@ -172,7 +201,7 @@ def _call_openai_json(model: str, system: str, user: str, max_tokens: int, tempe
         max_tokens=max_tokens,
     )
     content = r.choices[0].message.content if r.choices else ""
-    return (content, getattr(r, "usage", None), "chat")
+    return (content, getattr(r, "usage", None), "chat_mt")
 
 # ---------- Optional AI ----------
 def pick_model(_: int, __: str) -> Tuple[str, int]:
@@ -241,13 +270,17 @@ def ai_sections_and_weights(
 
         # Show which path was used + usage if available
         try:
-            if usage:
-                st.caption(
-                    f"AI ({path}) • model={model} • input={getattr(usage,'input_tokens','?')} "
-                    f"output={getattr(usage,'output_tokens','?')} total={getattr(usage,'total_tokens','?')}"
-                )
+            if usage and hasattr(usage, "__dict__"):
+                # Responses API usage has input_tokens/output_tokens; Chat has prompt/completion/total
+                meta = usage.__dict__
+                it = meta.get("input_tokens") or meta.get("prompt_tokens") or "?"
+                ot = meta.get("output_tokens") or meta.get("completion_tokens") or "?"
+                tt = meta.get("total_tokens") or (it if isinstance(it,int) else "?")
+                if isinstance(ot, int) and isinstance(it, int):
+                    tt = it + ot
+                st.caption(f"AI ({path}) • model={model} • input={it} output={ot} total={tt}")
             else:
-                st.caption(f"AI ({path}) • model={model} • max_output_tokens={max_tokens}")
+                st.caption(f"AI ({path}) • model={model} • max_tokens≈{max_tokens}")
         except Exception:
             pass
 
