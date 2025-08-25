@@ -17,7 +17,7 @@ THEMES = ["Identity", "Growth", "Connection", "Peace", "Adventure", "Contributio
 
 st.set_page_config(page_title=APP_TITLE, page_icon="✨", layout="centered")
 
-# ---------------- Secrets helper ----------------
+# ---------------- Secrets/helper ----------------
 def get_secret(name: str, default: str = "") -> str:
     try:
         if name in st.secrets:
@@ -29,28 +29,26 @@ def get_secret(name: str, default: str = "") -> str:
 OPENAI_API_KEY = get_secret("OPENAI_API_KEY", "")
 if OPENAI_API_KEY:
     os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY  # OpenAI SDK reads from env
-HIGH_MODEL = get_secret("OPENAI_HIGH_MODEL", "gpt-5-mini")
 
+# Model + caps (defaults are “deluxe”)
+HIGH_MODEL = get_secret("OPENAI_HIGH_MODEL", "gpt-5-mini")
 def _to_int(s: str, fallback: int) -> int:
     try:
         return int(str(s).strip())
     except Exception:
         return fallback
-
-# Default deluxe caps
 MAX_TOK_HIGH = _to_int(get_secret("MAX_OUTPUT_TOKENS_HIGH", "7000"), 7000)
 FALLBACK_CAP = _to_int(get_secret("MAX_OUTPUT_TOKENS_FALLBACK", "6000"), 6000)
 USE_AI = bool(OPENAI_API_KEY)
 
 # ---------------- Diagnostics (temporary) ----------------
-with st.expander("🔧 Diagnostics (temporary)", expanded=True):
+with st.expander("🔧 Diagnostics (temporary)", expanded=False):
     st.write("Python:", sys.version.split()[0])
     st.write("__file__:", __file__)
     st.write("cwd:", os.getcwd())
     here = Path(__file__).parent
-    st.write("Directory listing next to app.py:")
     try:
-        st.write([p.name for p in here.iterdir()])
+        st.write("Directory listing next to app.py:", [p.name for p in here.iterdir()])
     except Exception as e:
         st.write("Dir list failed:", e)
     try:
@@ -105,7 +103,7 @@ def get_logo_png_path() -> Optional[str]:
                 return str(p)
             if p.suffix.lower() == ".webp":
                 try:
-                    img = Image.open(p).convert("RGB")  # flatten to RGB (no alpha)
+                    img = Image.open(p).convert("RGB")
                     out = Path("/tmp/logo.png")
                     img.save(out, format="PNG")
                     return str(out)
@@ -129,14 +127,14 @@ def safe_text(s: str) -> str:
     s = unicodedata.normalize("NFKD", s).encode("latin-1", "ignore").decode("latin-1")
     return s
 
-# ---------------- OpenAI wrapper (no temperature, no legacy max_tokens) ----------------
+# ---------------- OpenAI wrapper (no temp / no legacy max_tokens) ----------------
 def _call_openai_json(model: str, system: str, user: str, cap: int):
     """
-    Use modern params only:
+    Try three paths, recording token usage when available:
       1) Chat Completions: JSON mode + max_completion_tokens
       2) Chat Completions: max_completion_tokens (no JSON mode)
-      3) Responses API: max_output_tokens (merged system+user)
-    Returns: (text, usage_or_None, path_label)
+      3) Responses API: max_output_tokens (system+user merged)
+    Returns: (text, usage_dict_or_None, path_label)
     """
     from openai import OpenAI
     client = OpenAI()
@@ -145,7 +143,7 @@ def _call_openai_json(model: str, system: str, user: str, cap: int):
         {"role": "user", "content": user},
     ]
 
-    # 1) Chat with JSON mode + max_completion_tokens (no temperature)
+    # 1) Chat with JSON mode
     try:
         r = client.chat.completions.create(
             model=model,
@@ -154,11 +152,20 @@ def _call_openai_json(model: str, system: str, user: str, cap: int):
             response_format={"type": "json_object"},
         )
         content = r.choices[0].message.content if r.choices else ""
-        return (content or "", getattr(r, "usage", None), "chat+rf_mct")
+        u = getattr(r, "usage", None)
+        usage = None
+        if u is not None:
+            # Standardize usage dict
+            usage = {
+                "input": getattr(u, "prompt_tokens", None),
+                "output": getattr(u, "completion_tokens", None),
+                "total": getattr(u, "total_tokens", None),
+            }
+        return (content or "", usage, "chat+rf_mct")
     except Exception:
         pass
 
-    # 2) Chat with max_completion_tokens (no response_format, no temperature)
+    # 2) Chat without response_format
     try:
         r = client.chat.completions.create(
             model=model,
@@ -166,11 +173,19 @@ def _call_openai_json(model: str, system: str, user: str, cap: int):
             max_completion_tokens=cap,
         )
         content = r.choices[0].message.content if r.choices else ""
-        return (content or "", getattr(r, "usage", None), "chat_mct")
+        u = getattr(r, "usage", None)
+        usage = None
+        if u is not None:
+            usage = {
+                "input": getattr(u, "prompt_tokens", None),
+                "output": getattr(u, "completion_tokens", None),
+                "total": getattr(u, "total_tokens", None),
+            }
+        return (content or "", usage, "chat_mct")
     except Exception:
         pass
 
-    # 3) Responses API with max_output_tokens (merge system+user, no temperature)
+    # 3) Responses API (merge system+user)
     try:
         merged = f"SYSTEM:\n{system}\n\nUSER:\n{user}"
         r = client.responses.create(
@@ -178,11 +193,22 @@ def _call_openai_json(model: str, system: str, user: str, cap: int):
             input=merged,
             max_output_tokens=cap,
         )
-        return (r.output_text or "", getattr(r, "usage", None), "responses+merged")
+        text = r.output_text or ""
+        u = getattr(r, "usage", None)
+        usage = None
+        if u is not None:
+            # responses.usage has input_tokens/output_tokens
+            usage = {
+                "input": getattr(u, "input_tokens", None),
+                "output": getattr(u, "output_tokens", None),
+                "total": None if (getattr(u, "input_tokens", None) is None or getattr(u, "output_tokens", None) is None)
+                         else getattr(u, "input_tokens") + getattr(u, "output_tokens"),
+            }
+        return (text, usage, "responses+merged")
     except Exception as e:
-        raise e  # surface helpful error
+        raise e  # let the caller surface the most helpful error
 
-# ---------------- AI helper ----------------
+# ---------------- AI glue ----------------
 def pick_model(_: int, __: str) -> Tuple[str, int]:
     return HIGH_MODEL, MAX_TOK_HIGH
 
@@ -198,7 +224,7 @@ def ai_sections_and_weights(
         return None
     st.session_state["ai_debug"] = {}
     try:
-        # ---- Build robust packed list from free_responses
+        # Pack free text robustly
         packed: List[dict] = []
         allowed_ids: List[str] = []
         for i, fr in enumerate(free_responses or []):
@@ -213,15 +239,15 @@ def ai_sections_and_weights(
             packed.append({"id": qid, "q": qtxt, "a": ans[:280]})
 
         score_lines = ", ".join([f"{k}: {v}" for k, v in scores.items()])
-        model, cap0 = pick_model(sum(len(p.get("a","")) for p in packed), depth_mode)
+        total_free_chars = sum(len(p.get("a","")) for p in packed)
+        model, cap0 = pick_model(total_free_chars, depth_mode)
 
-        # Backoff caps in case the model rejects large outputs
+        # Backoff caps
         caps_try = []
         for c in [cap0, 6000, 4000, FALLBACK_CAP, 2500, 1200]:
             if c not in caps_try and c > 0:
                 caps_try.append(c)
 
-        # ---- Prompt (includes allowed_ids)
         prompt = (
             "You are a warm, practical life coach. Return ONLY valid JSON with keys:\n"
             "  archetype (string), core_need (string),\n"
@@ -257,7 +283,6 @@ def ai_sections_and_weights(
             "If none apply, return an empty object for 'weights'.\n"
             "Tone: empathetic, encouraging, plain language. No medical/clinical claims. JSON only."
         ).format(h=horizon_weeks)
-
         system = "Reply with helpful coaching guidance as STRICT JSON only."
 
         last_err = None
@@ -283,12 +308,23 @@ def ai_sections_and_weights(
                         data = json.loads(raw2)
                     else:
                         raise ValueError("No JSON object found in completion.")
+                # Debug + token tracker
                 st.session_state["ai_debug"] = {
                     "path": last_path,
                     "cap_used": cap_used,
                     "raw_head": raw[:800],
                     "raw_len": len(raw),
                 }
+                if usage:
+                    st.session_state["token_usage"] = {
+                        "model": model,
+                        "path": last_path,
+                        "cap_used": cap_used,
+                        "input": usage.get("input"),
+                        "output": usage.get("output"),
+                        "total": usage.get("total"),
+                        "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                    }
                 try:
                     Path("/tmp/last_ai.json").write_text(raw, encoding="utf-8")
                 except Exception:
@@ -298,13 +334,10 @@ def ai_sections_and_weights(
                 last_err = e
                 continue
         else:
-            st.session_state["ai_debug"] = {
-                "error": f"{type(last_err).__name__}: {last_err}",
-                "path": last_path,
-            }
+            st.session_state["ai_debug"] = {"error": f"{type(last_err).__name__}: {last_err}", "path": last_path}
             return None
 
-        # ---- Normalize output safely
+        # Normalize
         out = {
             "archetype": str(data.get("archetype", "")),
             "core_need": str(data.get("core_need", "")),
@@ -329,7 +362,6 @@ def ai_sections_and_weights(
             "from_words": {},
             "micro_pledge": str(data.get("micro_pledge", "")),
         }
-
         fw = data.get("from_words") or {}
         out["from_words"] = {
             "themes": [str(x) for x in (fw.get("themes") or [])][:3],
@@ -339,7 +371,6 @@ def ai_sections_and_weights(
             "relationship_moment": str(fw.get("relationship_moment", "")),
             "stress_reset": str(fw.get("stress_reset", "")),
         }
-
         weights = data.get("weights") or {}
         for qid, w in weights.items():
             clean = {}
@@ -354,25 +385,8 @@ def ai_sections_and_weights(
                             pass
             if clean:
                 out["weights"][str(qid)] = clean
-
-        # usage caption
-        try:
-            if usage and hasattr(usage, "__dict__"):
-                meta = usage.__dict__
-                it = meta.get("input_tokens") or meta.get("prompt_tokens") or "?"
-                ot = meta.get("output_tokens") or meta.get("completion_tokens") or "?"
-                tt = meta.get("total_tokens") or (it if isinstance(it,int) else "?")
-                if isinstance(ot, int) and isinstance(it, int):
-                    tt = it + ot
-                st.caption(f"AI ({st.session_state['ai_debug'].get('path','?')}) • cap_used={cap_used} • input={it} output={ot} total={tt}")
-            else:
-                st.caption(f"AI ({st.session_state['ai_debug'].get('path','?')}) • cap_used={cap_used}")
-        except Exception:
-            pass
-
         return out
     except Exception as e:
-        # expose exact failure so we can see it in the UI
         st.session_state["ai_debug"] = {"fatal": f"{type(e).__name__}: {e}"}
         return None
 
@@ -689,13 +703,16 @@ with st.expander("AI status (debug)", expanded=False):
         st.warning("No OPENAI_API_KEY found. Add it in Settings → Secrets.")
     if USE_AI and st.button("Test OpenAI now"):
         try:
-            raw, _, path = _call_openai_json(
+            raw, usage, path = _call_openai_json(
                 HIGH_MODEL,
                 "Return strict JSON only.",
                 'Return {"ok": true} as JSON.',
                 cap=64,
             )
-            st.success(f"OK — via {path}. Output: {raw}")
+            msg = f"OK — via {path}. Output: {raw}"
+            if usage:
+                msg += f" | usage: in={usage.get('input')} out={usage.get('output')} total={usage.get('total')}"
+            st.success(msg)
         except Exception as e:
             st.error(f"OpenAI error: {e}")
 
@@ -720,8 +737,7 @@ if st.session_state.get("first_name"):
 
     with st.expander("Personalization options"):
         horizon_weeks = st.slider("Future snapshot horizon (weeks)", 2, 8, 4)
-    depth_mode = "High"
-    st.session_state["depth"] = "high"
+    st.session_state["depth"] = "high"  # always High for deluxe
 
     for q in questions:
         st.subheader(q["text"])
@@ -742,48 +758,76 @@ if st.session_state.get("first_name"):
             free_responses.append({"id": q["id"], "question": q["text"], "answer": free_text_val})
         st.divider()
 
+    # -------- Email & Download (reliable submit) --------
     st.subheader("Email & Download")
     with st.form("finish_form"):
-        email = st.text_input("Your email (for your download link)", placeholder="you@example.com")
-        consent = st.checkbox("I agree to receive my results and occasional updates from Life Minus Work.")
-        ready = st.form_submit_button("Generate My Personalized Report")
-        if ready and (not email or not consent):
-            st.error("Please enter your email and give consent to continue.")
+        email_val = st.text_input(
+            "Your email (for your download link)",
+            key="email_input",
+            placeholder="you@example.com",
+        )
+        consent_val = st.checkbox(
+            "I agree to receive my results and occasional updates from Life Minus Work.",
+            key="consent_input",
+            value=st.session_state.get("consent_input", False),
+        )
+        submit_clicked = st.form_submit_button("Generate My Personalized Report")
+        if submit_clicked:
+            if not email_val or not consent_val:
+                st.error("Please enter your email and give consent to continue.")
+            else:
+                st.session_state["email"] = email_val.strip()
+                st.session_state["consent"] = True
+                st.session_state["request_report"] = True
+                st.toast("Generating your report…", icon="⏳")
 
-    # Show AI generation details after submission
-    def show_ai_debug_box():
-        dbg = st.session_state.get("ai_debug") or {}
-        if not dbg:
-            return
-        with st.expander("AI generation details (debug)"):
-            for k, v in dbg.items():
-                if k == "raw_head" and isinstance(v, str):
-                    st.text_area("raw_head (first 800 chars)", v, height=200)
-                else:
-                    st.write(f"{k}: {v}")
-            p = Path("/tmp/last_ai.json")
-            if p.exists():
-                st.download_button(
-                    "Download last_ai.json",
-                    data=p.read_bytes(),
-                    file_name="last_ai.json",
-                    mime="application/json",
-                )
+    # Do the work after form submit (survives rerun)
+    if st.session_state.get("request_report"):
+        st.session_state["request_report"] = False
 
-    if ready and email and consent:
         scores = compute_scores(answers, questions)
+        top3 = top_themes(scores, 3)
 
         sections = {"summary": "", "actions": [], "weekly_plan": [], "weights": {}}
         if USE_AI:
             maybe = ai_sections_and_weights(
                 scores,
-                top_themes(scores),
+                top3,
                 free_responses,
                 st.session_state.get("first_name", ""),
                 horizon_weeks=horizon_weeks,
-                depth_mode=depth_mode,
+                depth_mode="High",
             )
-            show_ai_debug_box()
+            # Debug box + token tracker
+            dbg = st.session_state.get("ai_debug") or {}
+            tok = st.session_state.get("token_usage") or {}
+            with st.expander("AI generation details (debug)", expanded=False):
+                if dbg:
+                    for k, v in dbg.items():
+                        if k == "raw_head" and isinstance(v, str):
+                            st.text_area("raw_head (first 800 chars)", v, height=200)
+                        else:
+                            st.write(f"{k}: {v}")
+                p = Path("/tmp/last_ai.json")
+                if p.exists():
+                    st.download_button(
+                        "Download last_ai.json",
+                        data=p.read_bytes(),
+                        file_name="last_ai.json",
+                        mime="application/json",
+                    )
+            with st.expander("Token usage (one run)", expanded=True):
+                if tok:
+                    st.write(
+                        f"Model: {tok.get('model','?')} | path: {tok.get('path','?')} | cap_used: {tok.get('cap_used','?')}"
+                    )
+                    st.write(
+                        f"Input tokens: {tok.get('input','?')} | Output tokens: {tok.get('output','?')} | Total: {tok.get('total','?')}"
+                    )
+                    st.caption(f"Timestamp: {tok.get('ts','?')}")
+                else:
+                    st.write("No usage returned by the API (some paths/models omit it).")
+
             if maybe:
                 sections.update(maybe)
                 if sections.get("weights"):
@@ -793,33 +837,28 @@ if st.session_state.get("first_name"):
                 st.warning("AI could not generate JSON this run — using a concise template instead.")
 
         if not sections.get("deep_insight"):
-            topnames = top_themes(scores)
-            top1 = topnames[0] if topnames else "what energizes you"
-            base = f"Thank you for completing the Reflection Quiz, {st.session_state.get('first_name','Friend')}."
-            actions = [
-                "Choose one tiny step you can take this week.",
-                "Tell a friend your plan—gentle accountability.",
-                "Schedule 20 minutes for reflection or journaling.",
-            ]
-            plan = [
-                "Name your intention.",
-                "15–20 minutes of learning or practice.",
-                "Reach out to someone who energizes you.",
-                "Take a calm walk or mindful pause.",
-                "Do one small adventurous thing.",
-                "Offer help or encouragement to someone.",
-                "Review your week and set the next tiny step.",
-            ]
-            fsnap = (
-                f"It is {horizon_weeks} weeks later. You have stayed close to what matters, "
-                f"protecting time for {top1}. A few tiny actions, repeated, build confidence. "
-                "You pause, adjust, and keep going."
-            )
-            sections = {
-                "deep_insight": base,
-                "actions": actions,
-                "weekly_plan": plan,
-                "future_snapshot": fsnap,
+            top1 = top3[0] if top3 else "what energizes you"
+            sections.update({
+                "deep_insight": f"Thank you for completing the Reflection Quiz, {st.session_state.get('first_name','Friend')}.",
+                "actions": [
+                    "Choose one tiny step you can take this week.",
+                    "Tell a friend your plan—gentle accountability.",
+                    "Schedule 20 minutes for reflection or journaling.",
+                ],
+                "weekly_plan": [
+                    "Name your intention.",
+                    "15–20 minutes of learning or practice.",
+                    "Reach out to someone who energizes you.",
+                    "Take a calm walk or mindful pause.",
+                    "Do one small adventurous thing.",
+                    "Offer help or encouragement to someone.",
+                    "Review your week and set the next tiny step.",
+                ],
+                "future_snapshot": (
+                    f"It is {horizon_weeks} weeks later. You have stayed close to what matters, "
+                    f"protecting time for {top1}. A few tiny actions, repeated, build confidence. "
+                    "You pause, adjust, and keep going."
+                ),
                 "horizon_weeks": horizon_weeks,
                 "weights": {},
                 "archetype": "",
@@ -834,14 +873,12 @@ if st.session_state.get("first_name"):
                 "blindspot": "",
                 "from_words": {},
                 "micro_pledge": "",
-            }
+            })
 
-        top3 = top_themes(scores, 3)
         logo_path = get_logo_png_path()
-
         pdf_bytes = make_pdf_bytes(
             st.session_state.get("first_name", ""),
-            email,
+            st.session_state.get("email", ""),
             scores,
             top3,
             sections,
@@ -857,6 +894,7 @@ if st.session_state.get("first_name"):
             mime="application/pdf",
         )
 
+        # (Optional) CSV logging to /tmp
         try:
             import csv
             ts = datetime.datetime.now().isoformat(timespec="seconds")
@@ -869,7 +907,7 @@ if st.session_state.get("first_name"):
                 writer.writerow([
                     ts,
                     st.session_state.get("first_name", ""),
-                    email,
+                    st.session_state.get("email", ""),
                     json.dumps(scores),
                     json.dumps(top3),
                 ])
