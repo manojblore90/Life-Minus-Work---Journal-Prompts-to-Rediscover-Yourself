@@ -37,7 +37,7 @@ def _to_int(s: str, fallback: int) -> int:
     except Exception:
         return fallback
 
-# Default “deluxe” caps; safe for most small models
+# Default deluxe caps
 MAX_TOK_HIGH = _to_int(get_secret("MAX_OUTPUT_TOKENS_HIGH", "7000"), 7000)
 FALLBACK_CAP = _to_int(get_secret("MAX_OUTPUT_TOKENS_FALLBACK", "6000"), 6000)
 USE_AI = bool(OPENAI_API_KEY)
@@ -180,7 +180,7 @@ def _call_openai_json(model: str, system: str, user: str, cap: int):
         )
         return (r.output_text or "", getattr(r, "usage", None), "responses+merged")
     except Exception as e:
-        raise e  # surface most helpful error
+        raise e  # surface helpful error
 
 # ---------------- AI helper ----------------
 def pick_model(_: int, __: str) -> Tuple[str, int]:
@@ -198,13 +198,22 @@ def ai_sections_and_weights(
         return None
     st.session_state["ai_debug"] = {}
     try:
+        # ---- Build robust packed list from free_responses
+        packed: List[dict] = []
+        allowed_ids: List[str] = []
+        for i, fr in enumerate(free_responses or []):
+            if not isinstance(fr, dict):
+                continue
+            ans = str(fr.get("answer", "")).strip()
+            if not ans:
+                continue
+            qid = str(fr.get("id") or fr.get("qid") or f"free_{i+1}")
+            qtxt = str(fr.get("question", "")).strip()[:160]
+            allowed_ids.append(qid)
+            packed.append({"id": qid, "q": qtxt, "a": ans[:280]})
+
         score_lines = ", ".join([f"{k}: {v}" for k, v in scores.items()])
-        packed = [
-            {"id": fr["id"], "q": fr["question"], "a": str(fr.get("answer", ""))[:280]}
-            for fr in free_responses if fr.get("answer")
-        ]
-        total_free_chars = sum(len(p.get("a","")) for p in packed)
-        model, cap0 = pick_model(total_free_chars, depth_mode)
+        model, cap0 = pick_model(sum(len(p.get("a","")) for p in packed), depth_mode)
 
         # Backoff caps in case the model rejects large outputs
         caps_try = []
@@ -212,6 +221,7 @@ def ai_sections_and_weights(
             if c not in caps_try and c > 0:
                 caps_try.append(c)
 
+        # ---- Prompt (includes allowed_ids)
         prompt = (
             "You are a warm, practical life coach. Return ONLY valid JSON with keys:\n"
             "  archetype (string), core_need (string),\n"
@@ -240,8 +250,11 @@ def ai_sections_and_weights(
             f"Theme scores so far: {score_lines}.\n"
             f"Top 3 themes: {', '.join(top3)}.\n"
             f"Horizon weeks: {horizon_weeks}.\n"
-            "Also consider these free-text answers (omit weights for questions you don't see):\n"
+            "Consider these free-text answers (omit weights for questions you don't see):\n"
             f"{json.dumps(packed, ensure_ascii=False)}\n"
+            "IMPORTANT: When returning 'weights', only use question_id keys from this list:\n"
+            f"{json.dumps(allowed_ids, ensure_ascii=False)}\n"
+            "If none apply, return an empty object for 'weights'.\n"
             "Tone: empathetic, encouraging, plain language. No medical/clinical claims. JSON only."
         ).format(h=horizon_weeks)
 
@@ -259,11 +272,9 @@ def ai_sections_and_weights(
                 last_path = path
                 cap_used = cap
                 raw = (raw or "").strip()
-                # Trim code fences if present
                 if raw.startswith("```"):
                     raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
                     raw = re.sub(r"\n```$", "", raw)
-                # Try to parse
                 try:
                     data = json.loads(raw)
                 except Exception:
@@ -272,7 +283,6 @@ def ai_sections_and_weights(
                         data = json.loads(raw2)
                     else:
                         raise ValueError("No JSON object found in completion.")
-                # If we got here, we have data — save debug and break
                 st.session_state["ai_debug"] = {
                     "path": last_path,
                     "cap_used": cap_used,
@@ -288,14 +298,13 @@ def ai_sections_and_weights(
                 last_err = e
                 continue
         else:
-            # Loop exhausted with no data
             st.session_state["ai_debug"] = {
                 "error": f"{type(last_err).__name__}: {last_err}",
                 "path": last_path,
             }
             return None
 
-        # Build normalized output
+        # ---- Normalize output safely
         out = {
             "archetype": str(data.get("archetype", "")),
             "core_need": str(data.get("core_need", "")),
@@ -344,7 +353,7 @@ def ai_sections_and_weights(
                         except Exception:
                             pass
             if clean:
-                out["weights"][qid] = clean
+                out["weights"][str(qid)] = clean
 
         # usage caption
         try:
@@ -363,6 +372,7 @@ def ai_sections_and_weights(
 
         return out
     except Exception as e:
+        # expose exact failure so we can see it in the UI
         st.session_state["ai_debug"] = {"fatal": f"{type(e).__name__}: {e}"}
         return None
 
@@ -621,8 +631,8 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         for fr in free_responses:
             if not fr.get("answer"):
                 continue
-            pdf.multi_cell(0, 6, safe_text(f"• {fr['question']}"))
-            pdf.multi_cell(0, 6, safe_text(f"  {fr['answer']}"))
+            pdf.multi_cell(0, 6, safe_text(f"• {fr.get('question','')}"))
+            pdf.multi_cell(0, 6, safe_text(f"  {fr.get('answer','')}"))
             pdf.ln(1)
 
     pdf.ln(3)
@@ -751,7 +761,6 @@ if st.session_state.get("first_name"):
                     st.text_area("raw_head (first 800 chars)", v, height=200)
                 else:
                     st.write(f"{k}: {v}")
-            # Offer last_ai.json if present
             p = Path("/tmp/last_ai.json")
             if p.exists():
                 st.download_button(
@@ -784,6 +793,8 @@ if st.session_state.get("first_name"):
                 st.warning("AI could not generate JSON this run — using a concise template instead.")
 
         if not sections.get("deep_insight"):
+            topnames = top_themes(scores)
+            top1 = topnames[0] if topnames else "what energizes you"
             base = f"Thank you for completing the Reflection Quiz, {st.session_state.get('first_name','Friend')}."
             actions = [
                 "Choose one tiny step you can take this week.",
@@ -801,8 +812,8 @@ if st.session_state.get("first_name"):
             ]
             fsnap = (
                 f"It is {horizon_weeks} weeks later. You have stayed close to what matters, "
-                f"protecting time for {top_themes(scores)[0] if top_themes(scores) else 'what energizes you'}. "
-                "A few tiny actions, repeated, build confidence. You pause, adjust, and keep going."
+                f"protecting time for {top1}. A few tiny actions, repeated, build confidence. "
+                "You pause, adjust, and keep going."
             )
             sections = {
                 "deep_insight": base,
