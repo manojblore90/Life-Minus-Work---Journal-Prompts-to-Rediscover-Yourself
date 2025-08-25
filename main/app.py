@@ -12,14 +12,35 @@ APP_TITLE = "Life Minus Work — Reflection Quiz (15 questions)"
 REPORT_TITLE = "Your Reflection Report"
 THEMES = ["Identity", "Growth", "Connection", "Peace", "Adventure", "Contribution"]
 
-# Deluxe defaults (force High every time)
-HIGH_MODEL   = os.getenv("OPENAI_HIGH_MODEL", "gpt-5-mini")
-MAX_TOK_HIGH = int(os.getenv("MAX_OUTPUT_TOKENS_HIGH", 7000))        # generous default
-FALLBACK_CAP = int(os.getenv("MAX_OUTPUT_TOKENS_FALLBACK", 6000))    # reliable fallback
-
 st.set_page_config(page_title=APP_TITLE, page_icon="✨", layout="centered")
 st.title(APP_TITLE)
 st.write("Answer 15 questions, add your own reflections, and instantly download a personalized PDF summary.")
+
+# --- Secrets helper: prefer st.secrets, fall back to os.environ ---
+def get_secret(name: str, default: str = "") -> str:
+    try:
+        if name in st.secrets:
+            return str(st.secrets[name])
+    except Exception:
+        pass
+    return os.getenv(name, default)
+
+# Pull key + config (prefer secrets)
+OPENAI_API_KEY = get_secret("OPENAI_API_KEY", "")
+if OPENAI_API_KEY:
+    # OpenAI SDK reads from env var; set it here.
+    os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+
+HIGH_MODEL   = get_secret("OPENAI_HIGH_MODEL", "gpt-5-mini")
+def _to_int(s: str, fallback: int) -> int:
+    try:
+        return int(str(s).strip())
+    except Exception:
+        return fallback
+MAX_TOK_HIGH = _to_int(get_secret("MAX_OUTPUT_TOKENS_HIGH", "7000"), 7000)
+FALLBACK_CAP = _to_int(get_secret("MAX_OUTPUT_TOKENS_FALLBACK", "6000"), 6000)
+
+USE_AI = bool(OPENAI_API_KEY)
 
 # ---------- Data loading ----------
 def load_questions(filename: str = "questions.json") -> Tuple[List[dict], List[str]]:
@@ -81,8 +102,6 @@ def safe_text(s: str) -> str:
     return s
 
 # ---------- Optional AI ----------
-USE_AI = bool(os.getenv("OPENAI_API_KEY"))
-
 def pick_model(_: int, __: str) -> Tuple[str, int]:
     """Always use High model & cap (Deluxe)."""
     return HIGH_MODEL, MAX_TOK_HIGH
@@ -558,6 +577,28 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
     return pdf.output(dest="S").encode("latin-1")
 
 # ---------- UI ----------
+# AI status (debug)
+with st.expander("AI status (debug)", expanded=False):
+    st.write("AI enabled:", USE_AI)
+    st.write("Model:", HIGH_MODEL)
+    st.write("Max tokens:", MAX_TOK_HIGH, "(fallback", FALLBACK_CAP, ")")
+    if not USE_AI:
+        st.warning("No OPENAI_API_KEY found. Add it in Settings → Secrets.")
+    # Optional quick connectivity test
+    if USE_AI and st.button("Test OpenAI now"):
+        try:
+            from openai import OpenAI
+            client = OpenAI()
+            r = client.responses.create(
+                model=HIGH_MODEL,
+                input='Return {"ok": true} as JSON.',
+                response_format={"type": "json_object"},
+                max_output_tokens=64,
+            )
+            st.success(f"OK — model={HIGH_MODEL}, output={r.output_text}")
+        except Exception as e:
+            st.error(f"OpenAI error: {e}")
+
 # Step 1: First name
 with st.form("intro_form"):
     first_name = st.text_input("First name", placeholder="e.g., Alex")
@@ -654,7 +695,7 @@ if st.session_state.get("first_name"):
             fsnap = (
                 f"It's {horizon_weeks} weeks later. You’ve stayed close to what matters, "
                 f"protecting time for {top_themes(scores)[0] if top_themes(scores) else 'what energizes you'}. "
-                f"A few tiny actions, repeated, build confidence. You pause, adjust, and keep going."
+                "A few tiny actions, repeated, build confidence. You pause, adjust, and keep going."
             )
             sections = {
                 "deep_insight": base,
