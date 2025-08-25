@@ -1,4 +1,3 @@
-
 import os
 import json
 import datetime
@@ -13,8 +12,9 @@ APP_TITLE = "Life Minus Work — Reflection Quiz (15 questions)"
 REPORT_TITLE = "Your Reflection Report"
 THEMES = ["Identity", "Growth", "Connection", "Peace", "Adventure", "Contribution"]
 
-# Read model from env if provided, else default
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano")  # can be overridden dynamically
+# Deluxe defaults (force High every time)
+HIGH_MODEL = os.getenv("OPENAI_HIGH_MODEL", "gpt-5-mini")
+MAX_TOK_HIGH = int(os.getenv("MAX_OUTPUT_TOKENS_HIGH", 15000))
 
 st.set_page_config(page_title=APP_TITLE, page_icon="✨", layout="centered")
 st.title(APP_TITLE)
@@ -37,9 +37,9 @@ def load_questions(filename: str = "questions.json") -> Tuple[List[dict], List[s
         data = json.load(f)
     return data["questions"], data.get("themes", [])
 
-# ---------- Logo loader (webp -> png if needed) ----------
+# ---------- Logo loader (webp -> png without alpha for FPDF 1.x) ----------
 def get_logo_png_path() -> Optional[str]:
-    """Try several common locations. If WEBP found, convert to /tmp/logo.png."""
+    """Try several common locations. If WEBP found, convert to /tmp/logo.png without alpha."""
     here = Path(__file__).parent
     candidates = [
         here / "logo.png",
@@ -55,7 +55,8 @@ def get_logo_png_path() -> Optional[str]:
                 return str(p)
             if p.suffix.lower() == ".webp":
                 try:
-                    img = Image.open(p).convert("RGBA")
+                    # FPDF 1.x can't handle PNG with alpha; flatten to RGB.
+                    img = Image.open(p).convert("RGB")
                     out = Path("/tmp/logo.png")
                     img.save(out, format="PNG")
                     return str(out)
@@ -63,35 +64,30 @@ def get_logo_png_path() -> Optional[str]:
                     return None
     return None
 
-# ---------- PDF text safety (force Latin-1 safe text for classic fpdf) ----------
+# ---------- PDF text safety (Latin-1 for classic fpdf) ----------
 def safe_text(s: str) -> str:
     if s is None:
         return ""
     s = str(s)
-    # common curly punctuation to ASCII
+    # normalize curly punctuation
     s = (s.replace("’", "'")
-           .replace("‘", "'")
-           .replace("“", '"')
-           .replace("”", '"')
-           .replace("–", "-")
-           .replace("—", "-")
-           .replace("…", "...")
-           .replace("•", "*")
-           .replace("–", "-"))
-    # normalize and strip non latin-1
+         .replace("‘", "'")
+         .replace("“", '"')
+         .replace("”", '"')
+         .replace("–", "-")
+         .replace("—", "-")
+         .replace("…", "...")
+         .replace("•", "*"))
+    # strip non-latin-1
     s = unicodedata.normalize("NFKD", s).encode("latin-1", "ignore").decode("latin-1")
     return s
 
 # ---------- Optional AI ----------
 USE_AI = bool(os.getenv("OPENAI_API_KEY"))
 
-def pick_model(total_free_chars: int, depth_mode: str, base_model: str = DEFAULT_MODEL) -> str:
-    lower = (base_model or "").lower()
-    if any(tag in lower for tag in ["gpt-5-mini", "gpt-5 "]):
-        return base_model
-    if total_free_chars > 500 or depth_mode == "High":
-        return "gpt-5-mini"
-    return base_model or "gpt-5-nano"
+def pick_model(_: int, __: str) -> Tuple[str, int]:
+    """Always use High model & cap (Deluxe)."""
+    return HIGH_MODEL, MAX_TOK_HIGH
 
 def ai_sections_and_weights(
     scores: Dict[str, int],
@@ -99,7 +95,7 @@ def ai_sections_and_weights(
     free_responses: List[dict],
     first_name: str,
     horizon_weeks: int = 4,
-    depth_mode: str = "Standard",
+    depth_mode: str = "High",
 ) -> Optional[dict]:
     if not USE_AI:
         return None
@@ -112,25 +108,24 @@ def ai_sections_and_weights(
             {"id": fr["id"], "q": fr["question"], "a": str(fr.get("answer", ""))[:280]}
             for fr in free_responses if fr.get("answer")
         ]
-        total_free_chars = sum(len(p.get("a","")) for p in packed)
-        model = pick_model(total_free_chars, depth_mode, DEFAULT_MODEL)
-        max_tokens = 1100 if (depth_mode == "High" or model.endswith("mini")) else 900
+        total_free_chars = sum(len(p.get("a", "")) for p in packed)
+        model, max_tokens = pick_model(total_free_chars, depth_mode)
 
         prompt = (
             "You are a warm, practical life coach. Return ONLY valid JSON with keys:\n"
             "  archetype (string), core_need (string),\n"
-            "  deep_insight (string, 140-220 words, address the user by first name),\n"
-            "  why_now (string, 60-100 words),\n"
-            "  strengths (array of 3-5 short strings),\n"
-            "  energizers (array of 3), drainers (array of 3),\n"
-            "  tensions (array of 1-2 short strings), blindspot (string <= 40 words),\n"
+            "  deep_insight (string, 220-380 words, address the user by first name),\n"
+            "  why_now (string, 100-150 words),\n"
+            "  strengths (array of 4-6 short strings),\n"
+            "  energizers (array of 4), drainers (array of 4),\n"
+            "  tensions (array of 2-3 short strings), blindspot (string <= 60 words),\n"
             "  actions (array of EXACTLY 3 short bullet strings),\n"
             "  if_then (array of EXACTLY 3 implementation-intention strings like: 'If it’s 7pm, then I…'),\n"
             "  weekly_plan (array of 7 brief day-plan strings),\n"
             "  affirmation (string <= 15 words), quote (string <= 20 words),\n"
             "  signature_metaphor (string <= 12 words), signature_sentence (string <= 20 words),\n"
-            "  top_theme_boosters (array of up to 3 short suggestions), pitfalls (array of up to 3),\n"
-            "  future_snapshot (string, 80-100 words, second-person, present tense, written AS IF it is {horizon} "
+            "  top_theme_boosters (array of up to 4 short suggestions), pitfalls (array of up to 4),\n"
+            "  future_snapshot (string, 120-160 words, second-person, present tense, written AS IF it is {h} "
             "weeks later and the person followed through),\n"
             "  weights (object mapping question_id -> object of theme:int in [-2,2]).\n"
             f"User first name: {first_name or 'Friend'}.\n"
@@ -140,7 +135,7 @@ def ai_sections_and_weights(
             "Also consider these free-text answers (omit weights for questions you don't see):\n"
             f"{json.dumps(packed, ensure_ascii=False)}\n"
             "Tone: empathetic, encouraging, plain language. No medical/clinical claims. JSON only."
-        ).format(horizon=horizon_weeks)
+        ).format(h=horizon_weeks)
 
         resp = client.responses.create(
             model=model,
@@ -153,7 +148,14 @@ def ai_sections_and_weights(
             max_output_tokens=max_tokens,
         )
         try:
-            st.caption(f"AI model used: {model} (max_tokens={max_tokens})")
+            u = getattr(resp, "usage", None)
+            if u:
+                st.caption(
+                    f"AI model: {model} • usage input={getattr(u,'input_tokens','?')} "
+                    f"output={getattr(u,'output_tokens','?')} total={getattr(u,'total_tokens','?')}"
+                )
+            else:
+                st.caption(f"AI model: {model} • max_output_tokens={max_tokens}")
         except Exception:
             pass
 
@@ -165,10 +167,10 @@ def ai_sections_and_weights(
             "core_need": str(data.get("core_need", "")),
             "deep_insight": str(data.get("deep_insight", "")),
             "why_now": str(data.get("why_now", "")),
-            "strengths": [str(x) for x in (data.get("strengths") or [])][:5],
-            "energizers": [str(x) for x in (data.get("energizers") or [])][:3],
-            "drainers": [str(x) for x in (data.get("drainers") or [])][:3],
-            "tensions": [str(x) for x in (data.get("tensions") or [])][:2],
+            "strengths": [str(x) for x in (data.get("strengths") or [])][:6],
+            "energizers": [str(x) for x in (data.get("energizers") or [])][:4],
+            "drainers": [str(x) for x in (data.get("drainers") or [])][:4],
+            "tensions": [str(x) for x in (data.get("tensions") or [])][:3],
             "blindspot": str(data.get("blindspot", "")),
             "actions": [str(x) for x in (data.get("actions") or [])][:3],
             "if_then": [str(x) for x in (data.get("if_then") or [])][:3],
@@ -177,8 +179,8 @@ def ai_sections_and_weights(
             "quote": str(data.get("quote", "")),
             "signature_metaphor": str(data.get("signature_metaphor", "")),
             "signature_sentence": str(data.get("signature_sentence", "")),
-            "top_theme_boosters": [str(x) for x in (data.get("top_theme_boosters") or [])][:3],
-            "pitfalls": [str(x) for x in (data.get("pitfalls") or [])][:3],
+            "top_theme_boosters": [str(x) for x in (data.get("top_theme_boosters") or [])][:4],
+            "pitfalls": [str(x) for x in (data.get("pitfalls") or [])][:4],
             "future_snapshot": str(data.get("future_snapshot", "")),
             "weights": {},
         }
@@ -226,9 +228,6 @@ def apply_free_text_weights(scores: Dict[str, int], ai_weights: Dict[str, Dict[s
 def top_themes(scores: Dict[str, int], k: int = 3) -> List[str]:
     return [name for name, _ in sorted(scores.items(), key=lambda x: x[1], reverse=True)[:k]]
 
-def lowest_themes(scores: Dict[str, int], k: int = 2) -> List[str]:
-    return [name for name, _ in sorted(scores.items(), key=lambda x: x[1])[:k]]
-
 def balancing_suggestion(theme: str) -> str:
     suggestions = {
         "Identity": "Choose one tiny ritual that reflects who you’re becoming.",
@@ -268,16 +267,6 @@ def paragraph(pdf: FPDF, title: str, body: str):
     for line in safe_text(body).split("\n"):
         pdf.multi_cell(0, 6, line)
     pdf.ln(2)
-
-def bullets(pdf: FPDF, title: str, items: List[str]):
-    if not items: return
-    pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 8, safe_text(title), ln=True)
-    pdf.set_font("Arial", "", 12)
-    for it in items:
-        pdf.cell(4, 6, "*")
-        pdf.multi_cell(0, 6, safe_text(it))
-    pdf.ln(1)
 
 def checkbox_line(pdf: FPDF, text: str):
     x = pdf.get_x()
@@ -394,7 +383,7 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
     if sections.get("if_then"):
         pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Implementation intentions (If–Then)", ln=True)
         pdf.set_font("Arial", "", 12)
-        for it in sections["if_then"]:
+        for it in sections.get("if_then", []):
             pdf.cell(4, 6, "*"); pdf.multi_cell(0, 6, safe_text(it))
         pdf.ln(1)
 
@@ -447,10 +436,16 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Your words we heard", ln=True)
         pdf.set_font("Arial", "", 12)
         for fr in free_responses:
-            if not fr.get("answer"): continue
+            if not fr.get("answer"):
+                continue
             pdf.multi_cell(0, 6, safe_text(f"• {fr['question']}"))
             pdf.multi_cell(0, 6, safe_text(f"  {fr['answer']}"))
             pdf.ln(1)
+
+    # Clear cue before checklist page
+    pdf.ln(3)
+    pdf.set_font("Arial", "B", 12)
+    pdf.multi_cell(0, 6, safe_text("On the next page: a printable ‘Signature Week — At a glance’ checklist you can use right away."))
 
     # New page: Signature Week (at a glance)
     pdf.add_page()
@@ -460,15 +455,19 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
     pdf.multi_cell(0, 6, safe_text("A simple plan you can print or screenshot. Check items off as you go."))
     pdf.ln(2)
 
-    # Draw a simple 7-row checklist table for the weekly_plan (or fall back)
+    # 7-row checklist for the weekly_plan (or fall back)
     week_items = sections.get("weekly_plan") or []
     if not week_items:
         week_items = [f"Do one small action for {t}" for t in top3] + ["Reflect and set next step"]
 
     for i, item in enumerate(week_items[:7]):
-        checkbox_line(pdf, f"Day {i+1}: {item}")
+        x = pdf.get_x()
+        y = pdf.get_y()
+        pdf.rect(x, y + 1.5, 4, 4)
+        pdf.set_x(x + 6)
+        pdf.multi_cell(0, 6, safe_text(f"Day {i+1}: {item}"))
 
-    # Tiny Progress Tracker (checkboxes) — repeat here for visibility
+    # Tiny Progress Tracker
     pdf.ln(2)
     pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, safe_text("Tiny Progress Tracker"), ln=True)
     pdf.set_font("Arial", "", 12)
@@ -478,7 +477,11 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         "Spend 20 minutes on your step and celebrate completion."
     ]
     for m in milestones[:3]:
-        checkbox_line(pdf, m)
+        x = pdf.get_x()
+        y = pdf.get_y()
+        pdf.rect(x, y + 1.5, 4, 4)
+        pdf.set_x(x + 6)
+        pdf.multi_cell(0, 6, safe_text(m))
     pdf.ln(2)
 
     # Footer
@@ -503,15 +506,14 @@ if st.session_state.get("first_name"):
     st.caption("Each question has choices *or* you can write your own answer.")
 
     questions, _ = load_questions("questions.json")
-    # answers dict: qid -> {"choice_idx": int|None, "free_text": str|None}
     answers: Dict[str, dict] = {}
     free_responses: List[dict] = []
 
-    # Personalization options
+    # Personalization (just the horizon; depth forced to High)
     with st.expander("Personalization options"):
         horizon_weeks = st.slider("Future snapshot horizon (weeks)", 2, 8, 4)
-        depth_mode = st.selectbox("Depth of AI write‑up", ["Standard", "High"], index=0)
-        st.session_state["depth"] = "high" if depth_mode == "High" else "standard"
+    depth_mode = "High"  # forced
+    st.session_state["depth"] = "high"
 
     for q in questions:
         st.subheader(q["text"])
@@ -547,14 +549,14 @@ if st.session_state.get("first_name"):
         # Compute scores from choices
         scores = compute_scores(answers, questions)
 
-        # If AI available, ask for sections + weights for free answers
+        # AI sections + optional weights from free text
         sections = {"summary": "", "actions": [], "weekly_plan": [], "weights": {}}
         if USE_AI:
             maybe = ai_sections_and_weights(
                 scores,
                 top_themes(scores),
                 free_responses,
-                st.session_state.get("first_name",""),
+                st.session_state.get("first_name", ""),
                 horizon_weeks=horizon_weeks,
                 depth_mode=depth_mode,
             )
@@ -564,7 +566,7 @@ if st.session_state.get("first_name"):
                     scores = apply_free_text_weights(scores, sections["weights"])
                 sections["horizon_weeks"] = horizon_weeks
 
-        # Fallback sections if AI off or failed
+        # Fallback if AI off/failed
         if not sections.get("deep_insight"):
             base = f"Thank you for completing the Reflection Quiz, {st.session_state.get('first_name','Friend')}."
             actions = [
@@ -584,9 +586,7 @@ if st.session_state.get("first_name"):
             fsnap = (
                 f"It’s {horizon_weeks} weeks later. You’ve stayed close to what matters, "
                 f"protecting time for {top_themes(scores)[0] if top_themes(scores) else 'what energizes you'}. "
-                f"Your days feel more intentional and lighter: a few tiny actions, repeated, build confidence. "
-                f"You check in with people who support you, and you’re proud of a small win you can point to. "
-                f"When setbacks pop up, you pause, adjust, and keep going. You can see your direction now—and it feels like you."
+                f"A few tiny actions, repeated, build confidence. You pause, adjust, and keep going."
             )
             sections = {
                 "deep_insight": base,
@@ -612,7 +612,7 @@ if st.session_state.get("first_name"):
         # PDF
         logo_path = get_logo_png_path()
         pdf_bytes = make_pdf_bytes(
-            st.session_state.get("first_name",""),
+            st.session_state.get("first_name", ""),
             email,
             scores,
             top3,
@@ -641,7 +641,7 @@ if st.session_state.get("first_name"):
                     writer.writerow(["timestamp", "first_name", "email", "scores", "top3"])
                 writer.writerow([
                     ts,
-                    st.session_state.get("first_name",""),
+                    st.session_state.get("first_name", ""),
                     email,
                     json.dumps(scores),
                     json.dumps(top3),
