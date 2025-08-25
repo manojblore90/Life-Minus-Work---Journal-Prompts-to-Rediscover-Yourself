@@ -37,6 +37,7 @@ def _to_int(s: str, fallback: int) -> int:
     except Exception:
         return fallback
 
+# Default “deluxe” caps; safe for most small models
 MAX_TOK_HIGH = _to_int(get_secret("MAX_OUTPUT_TOKENS_HIGH", "7000"), 7000)
 FALLBACK_CAP = _to_int(get_secret("MAX_OUTPUT_TOKENS_FALLBACK", "6000"), 6000)
 USE_AI = bool(OPENAI_API_KEY)
@@ -129,7 +130,7 @@ def safe_text(s: str) -> str:
     return s
 
 # ---------------- OpenAI wrapper (no temperature, no legacy max_tokens) ----------------
-def _call_openai_json(model: str, system: str, user: str, cap: int, temperature: float = 0.7):
+def _call_openai_json(model: str, system: str, user: str, cap: int):
     """
     Use modern params only:
       1) Chat Completions: JSON mode + max_completion_tokens
@@ -179,8 +180,7 @@ def _call_openai_json(model: str, system: str, user: str, cap: int, temperature:
         )
         return (r.output_text or "", getattr(r, "usage", None), "responses+merged")
     except Exception as e:
-        # if this also fails, surface the most useful error
-        raise e
+        raise e  # surface most helpful error
 
 # ---------------- AI helper ----------------
 def pick_model(_: int, __: str) -> Tuple[str, int]:
@@ -196,6 +196,7 @@ def ai_sections_and_weights(
 ) -> Optional[dict]:
     if not USE_AI:
         return None
+    st.session_state["ai_debug"] = {}
     try:
         score_lines = ", ".join([f"{k}: {v}" for k, v in scores.items()])
         packed = [
@@ -203,7 +204,13 @@ def ai_sections_and_weights(
             for fr in free_responses if fr.get("answer")
         ]
         total_free_chars = sum(len(p.get("a","")) for p in packed)
-        model, cap = pick_model(total_free_chars, depth_mode)
+        model, cap0 = pick_model(total_free_chars, depth_mode)
+
+        # Backoff caps in case the model rejects large outputs
+        caps_try = []
+        for c in [cap0, 6000, 4000, FALLBACK_CAP, 2500, 1200]:
+            if c not in caps_try and c > 0:
+                caps_try.append(c)
 
         prompt = (
             "You are a warm, practical life coach. Return ONLY valid JSON with keys:\n"
@@ -240,39 +247,55 @@ def ai_sections_and_weights(
 
         system = "Reply with helpful coaching guidance as STRICT JSON only."
 
-        try:
-            raw, usage, path = _call_openai_json(model, system, prompt, cap)
-        except Exception:
-            raw, usage, path = _call_openai_json(model, system, prompt, FALLBACK_CAP)
+        last_err = None
+        last_path = "n/a"
+        raw = ""
+        usage = None
+        cap_used = None
 
-        try:
-            if usage and hasattr(usage, "__dict__"):
-                meta = usage.__dict__
-                it = meta.get("input_tokens") or meta.get("prompt_tokens") or "?"
-                ot = meta.get("output_tokens") or meta.get("completion_tokens") or "?"
-                tt = meta.get("total_tokens") or (it if isinstance(it,int) else "?")
-                if isinstance(ot, int) and isinstance(it, int):
-                    tt = it + ot
-                st.caption(f"AI ({path}) • model={model} • input={it} output={ot} total={tt}")
-            else:
-                st.caption(f"AI ({path}) • model={model} • cap≈{cap}")
-        except Exception:
-            pass
+        for cap in caps_try:
+            try:
+                raw, usage, path = _call_openai_json(model, system, prompt, cap)
+                last_path = path
+                cap_used = cap
+                raw = (raw or "").strip()
+                # Trim code fences if present
+                if raw.startswith("```"):
+                    raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
+                    raw = re.sub(r"\n```$", "", raw)
+                # Try to parse
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    if "{" in raw and "}" in raw:
+                        raw2 = raw[raw.find("{"): raw.rfind("}") + 1]
+                        data = json.loads(raw2)
+                    else:
+                        raise ValueError("No JSON object found in completion.")
+                # If we got here, we have data — save debug and break
+                st.session_state["ai_debug"] = {
+                    "path": last_path,
+                    "cap_used": cap_used,
+                    "raw_head": raw[:800],
+                    "raw_len": len(raw),
+                }
+                try:
+                    Path("/tmp/last_ai.json").write_text(raw, encoding="utf-8")
+                except Exception:
+                    pass
+                break
+            except Exception as e:
+                last_err = e
+                continue
+        else:
+            # Loop exhausted with no data
+            st.session_state["ai_debug"] = {
+                "error": f"{type(last_err).__name__}: {last_err}",
+                "path": last_path,
+            }
+            return None
 
-        raw = (raw or "").strip()
-        if raw.startswith("```"):
-            raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
-            raw = re.sub(r"\n```$", "", raw)
-
-        try:
-            data = json.loads(raw)
-        except Exception:
-            if "{" in raw and "}" in raw:
-                raw2 = raw[raw.find("{"): raw.rfind("}") + 1]
-                data = json.loads(raw2)
-            else:
-                raise
-
+        # Build normalized output
         out = {
             "archetype": str(data.get("archetype", "")),
             "core_need": str(data.get("core_need", "")),
@@ -322,8 +345,25 @@ def ai_sections_and_weights(
                             pass
             if clean:
                 out["weights"][qid] = clean
+
+        # usage caption
+        try:
+            if usage and hasattr(usage, "__dict__"):
+                meta = usage.__dict__
+                it = meta.get("input_tokens") or meta.get("prompt_tokens") or "?"
+                ot = meta.get("output_tokens") or meta.get("completion_tokens") or "?"
+                tt = meta.get("total_tokens") or (it if isinstance(it,int) else "?")
+                if isinstance(ot, int) and isinstance(it, int):
+                    tt = it + ot
+                st.caption(f"AI ({st.session_state['ai_debug'].get('path','?')}) • cap_used={cap_used} • input={it} output={ot} total={tt}")
+            else:
+                st.caption(f"AI ({st.session_state['ai_debug'].get('path','?')}) • cap_used={cap_used}")
+        except Exception:
+            pass
+
         return out
-    except Exception:
+    except Exception as e:
+        st.session_state["ai_debug"] = {"fatal": f"{type(e).__name__}: {e}"}
         return None
 
 # ---------------- Scoring ----------------
@@ -700,6 +740,27 @@ if st.session_state.get("first_name"):
         if ready and (not email or not consent):
             st.error("Please enter your email and give consent to continue.")
 
+    # Show AI generation details after submission
+    def show_ai_debug_box():
+        dbg = st.session_state.get("ai_debug") or {}
+        if not dbg:
+            return
+        with st.expander("AI generation details (debug)"):
+            for k, v in dbg.items():
+                if k == "raw_head" and isinstance(v, str):
+                    st.text_area("raw_head (first 800 chars)", v, height=200)
+                else:
+                    st.write(f"{k}: {v}")
+            # Offer last_ai.json if present
+            p = Path("/tmp/last_ai.json")
+            if p.exists():
+                st.download_button(
+                    "Download last_ai.json",
+                    data=p.read_bytes(),
+                    file_name="last_ai.json",
+                    mime="application/json",
+                )
+
     if ready and email and consent:
         scores = compute_scores(answers, questions)
 
@@ -713,11 +774,14 @@ if st.session_state.get("first_name"):
                 horizon_weeks=horizon_weeks,
                 depth_mode=depth_mode,
             )
+            show_ai_debug_box()
             if maybe:
                 sections.update(maybe)
                 if sections.get("weights"):
                     scores = apply_free_text_weights(scores, sections["weights"])
                 sections["horizon_weeks"] = horizon_weeks
+            else:
+                st.warning("AI could not generate JSON this run — using a concise template instead.")
 
         if not sections.get("deep_insight"):
             base = f"Thank you for completing the Reflection Quiz, {st.session_state.get('first_name','Friend')}."
