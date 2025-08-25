@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import json
 import datetime
@@ -15,10 +16,10 @@ REPORT_TITLE = "Your Reflection Report"
 THEMES = ["Identity", "Growth", "Connection", "Peace", "Adventure", "Contribution"]
 
 st.set_page_config(page_title=APP_TITLE, page_icon="✨", layout="centered")
-st.title(APP_TITLE)
-st.write("Answer 15 questions, add your own reflections, and instantly download a personalized PDF summary.")
 
-# --- Secrets helper: prefer st.secrets, fall back to os.environ ---
+# ──────────────────────────────────────────────────────────────────────────────
+# Secrets helper: prefer st.secrets, fall back to env
+# ──────────────────────────────────────────────────────────────────────────────
 def get_secret(name: str, default: str = "") -> str:
     try:
         if name in st.secrets:
@@ -27,12 +28,9 @@ def get_secret(name: str, default: str = "") -> str:
         pass
     return os.getenv(name, default)
 
-# Pull key + config (prefer secrets)
 OPENAI_API_KEY = get_secret("OPENAI_API_KEY", "")
 if OPENAI_API_KEY:
     os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY  # OpenAI SDK reads from env
-
-# Default model if not set in secrets
 HIGH_MODEL = get_secret("OPENAI_HIGH_MODEL", "gpt-5-mini")
 
 def _to_int(s: str, fallback: int) -> int:
@@ -41,13 +39,48 @@ def _to_int(s: str, fallback: int) -> int:
     except Exception:
         return fallback
 
-# Output caps
 MAX_TOK_HIGH = _to_int(get_secret("MAX_OUTPUT_TOKENS_HIGH", "7000"), 7000)
 FALLBACK_CAP = _to_int(get_secret("MAX_OUTPUT_TOKENS_FALLBACK", "6000"), 6000)
-
 USE_AI = bool(OPENAI_API_KEY)
 
-# ---------- Data loading ----------
+# ──────────────────────────────────────────────────────────────────────────────
+# Diagnostics (temporary)
+# ──────────────────────────────────────────────────────────────────────────────
+with st.expander("🔧 Diagnostics (temporary)", expanded=True):
+    st.write("Python:", sys.version.split()[0])
+    st.write("__file__:", __file__)
+    st.write("cwd:", os.getcwd())
+    here = Path(__file__).parent
+    st.write("Directory listing next to app.py:")
+    try:
+        st.write([p.name for p in here.iterdir()])
+    except Exception as e:
+        st.write("Dir list failed:", e)
+
+    try:
+        import openai as _oai
+        st.write("openai SDK version:", getattr(_oai, "__version__", "unknown"))
+    except Exception as e:
+        st.write("openai import error:", e)
+
+    masked = (OPENAI_API_KEY[:4] + "…" + OPENAI_API_KEY[-4:]) if OPENAI_API_KEY else "None"
+    st.write("OPENAI_API_KEY detected:", bool(OPENAI_API_KEY), "| key:", masked if OPENAI_API_KEY else "—")
+    st.write("Model:", HIGH_MODEL, "| MAX_TOK_HIGH:", MAX_TOK_HIGH, "| FALLBACK_CAP:", FALLBACK_CAP)
+
+    # Quick probe to confirm questions.json is reachable
+    if st.button("Probe: load questions.json"):
+        p = here / "questions.json"
+        st.write("Path:", str(p), "| exists:", p.exists())
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                st.success(f"Loaded {len(data.get('questions', []))} questions.")
+            except Exception as e:
+                st.error(f"JSON load error: {e}")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Data loading
+# ──────────────────────────────────────────────────────────────────────────────
 def load_questions(filename: str = "questions.json") -> Tuple[List[dict], List[str]]:
     base_dir = Path(__file__).parent
     path = base_dir / filename
@@ -64,9 +97,10 @@ def load_questions(filename: str = "questions.json") -> Tuple[List[dict], List[s
         data = json.load(f)
     return data["questions"], data.get("themes", [])
 
-# ---------- Logo loader (webp -> png without alpha for FPDF 1.x) ----------
+# ──────────────────────────────────────────────────────────────────────────────
+# Logo loader (webp -> png without alpha for FPDF 1.x)
+# ──────────────────────────────────────────────────────────────────────────────
 def get_logo_png_path() -> Optional[str]:
-    """Try several common locations. If WEBP found, convert to /tmp/logo.png without alpha."""
     here = Path(__file__).parent
     candidates = [
         here / "logo.png",
@@ -90,7 +124,9 @@ def get_logo_png_path() -> Optional[str]:
                     return None
     return None
 
-# ---------- PDF text safety (Latin-1 for classic fpdf) ----------
+# ──────────────────────────────────────────────────────────────────────────────
+# PDF text safety (Latin-1)
+# ──────────────────────────────────────────────────────────────────────────────
 def safe_text(s: str) -> str:
     if s is None:
         return ""
@@ -106,10 +142,12 @@ def safe_text(s: str) -> str:
     s = unicodedata.normalize("NFKD", s).encode("latin-1", "ignore").decode("latin-1")
     return s
 
-# ---------- AI call compatibility wrapper (supports openai>=1.60.0 and older styles) ----------
+# ──────────────────────────────────────────────────────────────────────────────
+# OpenAI compatibility wrapper (supports new/old params)
+# ──────────────────────────────────────────────────────────────────────────────
 def _call_openai_json(model: str, system: str, user: str, max_tokens: int, temperature: float = 0.7):
     """
-    Compatibility wrapper for differing OpenAI SDK/model params:
+    Tries multiple paths so we're compatible with differing SDKs:
       1) Responses API with response_format + max_output_tokens
       2) Responses API without response_format
       3) Chat Completions with response_format + max_completion_tokens (newer)
@@ -122,7 +160,7 @@ def _call_openai_json(model: str, system: str, user: str, max_tokens: int, tempe
     client = OpenAI()
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
-    # 1) Responses + response_format + max_output_tokens
+    # 1) Responses + response_format
     try:
         r = client.responses.create(
             model=model,
@@ -138,7 +176,7 @@ def _call_openai_json(model: str, system: str, user: str, max_tokens: int, tempe
     except Exception:
         pass
 
-    # 2) Responses without response_format
+    # 2) Responses (no response_format)
     try:
         r = client.responses.create(
             model=model,
@@ -150,7 +188,7 @@ def _call_openai_json(model: str, system: str, user: str, max_tokens: int, tempe
     except Exception:
         pass
 
-    # 3) Chat + response_format + max_completion_tokens (newer)
+    # 3) Chat + rf + max_completion_tokens
     try:
         r = client.chat.completions.create(
             model=model,
@@ -166,7 +204,7 @@ def _call_openai_json(model: str, system: str, user: str, max_tokens: int, tempe
     except Exception:
         pass
 
-    # 4) Chat + response_format + max_tokens (legacy)
+    # 4) Chat + rf + max_tokens
     try:
         r = client.chat.completions.create(
             model=model,
@@ -180,7 +218,7 @@ def _call_openai_json(model: str, system: str, user: str, max_tokens: int, tempe
     except Exception:
         pass
 
-    # 5) Chat without response_format + max_completion_tokens
+    # 5) Chat + max_completion_tokens
     try:
         r = client.chat.completions.create(
             model=model,
@@ -193,7 +231,7 @@ def _call_openai_json(model: str, system: str, user: str, max_tokens: int, tempe
     except Exception:
         pass
 
-    # 6) Chat without response_format + max_tokens
+    # 6) Chat + max_tokens (last resort)
     r = client.chat.completions.create(
         model=model,
         messages=messages,
@@ -203,9 +241,10 @@ def _call_openai_json(model: str, system: str, user: str, max_tokens: int, tempe
     content = r.choices[0].message.content if r.choices else ""
     return (content, getattr(r, "usage", None), "chat_mt")
 
-# ---------- Optional AI ----------
+# ──────────────────────────────────────────────────────────────────────────────
+# AI section builder
+# ──────────────────────────────────────────────────────────────────────────────
 def pick_model(_: int, __: str) -> Tuple[str, int]:
-    """Always use High model & cap (Deluxe)."""
     return HIGH_MODEL, MAX_TOK_HIGH
 
 def ai_sections_and_weights(
@@ -262,16 +301,13 @@ def ai_sections_and_weights(
 
         system = "Reply with helpful coaching guidance as STRICT JSON only."
 
-        # Primary attempt; if that fails, fallback once with lower cap
         try:
             raw, usage, path = _call_openai_json(model, system, prompt, max_tokens, temperature=0.7)
         except Exception:
             raw, usage, path = _call_openai_json(model, system, prompt, FALLBACK_CAP, temperature=0.7)
 
-        # Show which path was used + usage if available
         try:
             if usage and hasattr(usage, "__dict__"):
-                # Responses API usage has input_tokens/output_tokens; Chat has prompt/completion/total
                 meta = usage.__dict__
                 it = meta.get("input_tokens") or meta.get("prompt_tokens") or "?"
                 ot = meta.get("output_tokens") or meta.get("completion_tokens") or "?"
@@ -284,13 +320,11 @@ def ai_sections_and_weights(
         except Exception:
             pass
 
-        # Clean accidental code fences around JSON
         raw = raw.strip()
         if raw.startswith("```"):
             raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
             raw = re.sub(r"\n```$", "", raw)
 
-        # Parse JSON (with last-ditch substring extraction)
         try:
             data = json.loads(raw)
         except Exception:
@@ -353,7 +387,9 @@ def ai_sections_and_weights(
     except Exception:
         return None
 
-# ---------- Scoring ----------
+# ──────────────────────────────────────────────────────────────────────────────
+# Scoring
+# ──────────────────────────────────────────────────────────────────────────────
 def compute_scores(answers: dict, questions: list) -> Dict[str, int]:
     scores = {t: 0 for t in THEMES}
     for q in questions:
@@ -389,7 +425,9 @@ def balancing_suggestion(theme: str) -> str:
     }
     return suggestions.get(theme, "Take one small, visible step this week.")
 
-# ---------- Pretty PDF (always safe_text) ----------
+# ──────────────────────────────────────────────────────────────────────────────
+# PDF helpers
+# ──────────────────────────────────────────────────────────────────────────────
 def draw_scores_barchart(pdf: FPDF, scores: Dict[str, int]):
     pdf.set_font("Arial", "B", 14)
     pdf.cell(0, 8, safe_text("Your Theme Snapshot"), ln=True)
@@ -463,14 +501,12 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 
-    # Logo (optional)
     if logo_path:
         try:
             pdf.image(logo_path, w=40); pdf.ln(2)
         except Exception:
             pass
 
-    # Title block
     pdf.set_font("Arial", "B", 18)
     pdf.cell(0, 10, safe_text(REPORT_TITLE), ln=True)
     pdf.set_font("Arial", "", 12)
@@ -482,7 +518,6 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         pdf.cell(0, 8, safe_text(f"Email: {email}"), ln=True)
     pdf.ln(1)
 
-    # Archetype/core & signature
     if sections.get("archetype") or sections.get("core_need"):
         label_value(pdf, "Archetype", sections.get("archetype","") or "—")
         label_value(pdf, "Core Need", sections.get("core_need","") or "—")
@@ -492,14 +527,11 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
             label_value(pdf, "Signature Sentence", sections.get("signature_sentence",""))
         pdf.ln(1)
 
-    # Top themes
     pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, safe_text("Top Themes"), ln=True)
     pdf.set_font("Arial", "", 12);  pdf.multi_cell(0, 6, safe_text(", ".join(top3))); pdf.ln(1)
 
-    # Score bars
     draw_scores_barchart(pdf, scores)
 
-    # From your words (new)
     fw = sections.get("from_words") or {}
     if fw and (fw.get("insight") or fw.get("themes") or fw.get("quotes")):
         quotes = [f'"{q}"' for q in fw.get("quotes", []) if q]
@@ -516,18 +548,15 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
     if sections.get("micro_pledge"):
         label_value(pdf, "Personal pledge", sections["micro_pledge"]); pdf.ln(1)
 
-    # Insight blocks
     if sections.get("deep_insight"):
         paragraph(pdf, "What this really says about you", sections["deep_insight"])
 
     if sections.get("why_now"):
         label_value(pdf, "Why this matters now", sections["why_now"]); pdf.ln(1)
 
-    # Future Snapshot callout
     if sections.get("future_snapshot"):
         future_callout(pdf, sections.get("horizon_weeks", 4), sections["future_snapshot"])
 
-    # Strengths / Energizers / Drainers
     if sections.get("strengths"):
         pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Signature strengths", ln=True)
         pdf.set_font("Arial", "", 12)
@@ -548,7 +577,6 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
             pdf.cell(4, 6, "-"); pdf.multi_cell(0, 6, safe_text(d))
         pdf.ln(1)
 
-    # Tensions & blindspot
     if sections.get("tensions"):
         pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Hidden tensions", ln=True)
         pdf.set_font("Arial", "", 12)
@@ -558,7 +586,6 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
     if sections.get("blindspot"):
         label_value(pdf, "Watch-out (gentle blind spot)", sections["blindspot"]); pdf.ln(1)
 
-    # Actions & If–Then plans
     if sections.get("actions"):
         pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "3 next-step actions (7 days)", ln=True)
         pdf.set_font("Arial", "", 12)
@@ -573,7 +600,6 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
             pdf.cell(4, 6, "*"); pdf.multi_cell(0, 6, safe_text(it))
         pdf.ln(1)
 
-    # Weekly plan
     if sections.get("weekly_plan"):
         pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "1-week gentle plan", ln=True)
         pdf.set_font("Arial", "", 12)
@@ -581,7 +607,6 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
             pdf.cell(0, 6, safe_text(f"Day {i+1}: {item}"), ln=True)
         pdf.ln(1)
 
-    # Balancing Opportunity (lowest 1–2 themes)
     lows = [name for name, _ in sorted(scores.items(), key=lambda x: x[1])[:2]]
     if lows:
         pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Balancing Opportunity", ln=True)
@@ -591,7 +616,6 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
             pdf.multi_cell(0, 6, safe_text(f"{theme}: {tip}"))
         pdf.ln(1)
 
-    # Boosters & Pitfalls (for top themes)
     if sections.get("top_theme_boosters") or sections.get("pitfalls"):
         pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Amplify what works / Avoid what trips you", ln=True)
         if sections.get("top_theme_boosters"):
@@ -606,7 +630,6 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
                 pdf.cell(4, 6, "-"); pdf.multi_cell(0, 6, safe_text(p))
         pdf.ln(1)
 
-    # Quote & affirmation
     if sections.get("affirmation") or sections.get("quote"):
         pdf.set_font("Arial", "B", 12); pdf.cell(0, 6, "Keep this in view", ln=True)
         pdf.set_font("Arial", "I", 11)
@@ -617,7 +640,6 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
             pdf.multi_cell(0, 6, safe_text(qtext))
         pdf.ln(2)
 
-    # Your reflections (free text)
     if free_responses:
         pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, "Your words we heard", ln=True)
         pdf.set_font("Arial", "", 12)
@@ -628,12 +650,10 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
             pdf.multi_cell(0, 6, safe_text(f"  {fr['answer']}"))
             pdf.ln(1)
 
-    # Clear cue before checklist page
     pdf.ln(3)
     pdf.set_font("Arial", "B", 12)
     pdf.multi_cell(0, 6, safe_text("On the next page: a printable ‘Signature Week — At a glance’ checklist you can use right away."))
 
-    # New page: Signature Week (at a glance)
     pdf.add_page()
     pdf.set_font("Arial", "B", 16)
     pdf.cell(0, 10, safe_text("Signature Week — At a glance"), ln=True)
@@ -641,7 +661,6 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
     pdf.multi_cell(0, 6, safe_text("A simple plan you can print or screenshot. Check items off as you go."))
     pdf.ln(2)
 
-    # 7-row checklist for the weekly_plan (or fall back)
     week_items = sections.get("weekly_plan") or []
     if not week_items:
         week_items = [f"Do one small action for {t}" for t in top3] + ["Reflect and set next step"]
@@ -653,7 +672,6 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         pdf.set_x(x + 6)
         pdf.multi_cell(0, 6, safe_text(f"Day {i+1}: {item}"))
 
-    # Tiny Progress Tracker
     pdf.ln(2)
     pdf.set_font("Arial", "B", 14); pdf.cell(0, 8, safe_text("Tiny Progress Tracker"), ln=True)
     pdf.set_font("Arial", "", 12)
@@ -670,13 +688,16 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         pdf.multi_cell(0, 6, safe_text(m))
     pdf.ln(2)
 
-    # Footer
     pdf.set_font("Arial", "I", 10); pdf.ln(2)
     pdf.multi_cell(0, 5, safe_text("Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice."))
     return pdf.output(dest="S").encode("latin-1")
 
-# ---------- UI ----------
-# AI status (debug)
+# ──────────────────────────────────────────────────────────────────────────────
+# UI
+# ──────────────────────────────────────────────────────────────────────────────
+st.title(APP_TITLE)
+st.write("Answer 15 questions, add your own reflections, and instantly download a personalized PDF summary.")
+
 with st.expander("AI status (debug)", expanded=False):
     st.write("AI enabled:", USE_AI)
     st.write("Model:", HIGH_MODEL)
@@ -715,10 +736,9 @@ if st.session_state.get("first_name"):
     answers: Dict[str, dict] = {}
     free_responses: List[dict] = []
 
-    # Personalization (just the horizon; depth forced to High)
     with st.expander("Personalization options"):
         horizon_weeks = st.slider("Future snapshot horizon (weeks)", 2, 8, 4)
-    depth_mode = "High"  # forced
+    depth_mode = "High"
     st.session_state["depth"] = "high"
 
     for q in questions:
@@ -741,21 +761,17 @@ if st.session_state.get("first_name"):
 
         st.divider()
 
-    # Step 3: Email & Download
     st.subheader("Email & Download")
     with st.form("finish_form"):
         email = st.text_input("Your email (for your download link)", placeholder="you@example.com")
         consent = st.checkbox("I agree to receive my results and occasional updates from Life Minus Work.")
         ready = st.form_submit_button("Generate My Personalized Report")
-
         if ready and (not email or not consent):
             st.error("Please enter your email and give consent to continue.")
 
     if ready and email and consent:
-        # Compute scores from choices
         scores = compute_scores(answers, questions)
 
-        # AI sections + optional weights from free text
         sections = {"summary": "", "actions": [], "weekly_plan": [], "weights": {}}
         if USE_AI:
             maybe = ai_sections_and_weights(
@@ -772,7 +788,6 @@ if st.session_state.get("first_name"):
                     scores = apply_free_text_weights(scores, sections["weights"])
                 sections["horizon_weeks"] = horizon_weeks
 
-        # Fallback if AI off/failed
         if not sections.get("deep_insight"):
             base = f"Thank you for completing the Reflection Quiz, {st.session_state.get('first_name','Friend')}."
             actions = [
@@ -816,9 +831,8 @@ if st.session_state.get("first_name"):
             }
 
         top3 = top_themes(scores, 3)
-
-        # PDF
         logo_path = get_logo_png_path()
+
         pdf_bytes = make_pdf_bytes(
             st.session_state.get("first_name", ""),
             email,
@@ -837,7 +851,6 @@ if st.session_state.get("first_name"):
             mime="application/pdf",
         )
 
-        # Save to /tmp (Cloud-safe, ephemeral)
         try:
             import csv
             ts = datetime.datetime.now().isoformat(timespec="seconds")
