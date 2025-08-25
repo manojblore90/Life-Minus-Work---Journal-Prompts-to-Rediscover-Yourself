@@ -132,18 +132,38 @@ def safe_text(s: str) -> str:
     return s
 
 # ---------------- PDF / font helpers (fpdf2 Unicode) ----------------
-def find_ttf_font() -> Optional[str]:
-    """Look for a Unicode TTF font in common locations."""
+def _font_candidates():
     here = Path(__file__).parent
-    candidates = [
-        here / "DejaVuSans.ttf",
-        here / "NotoSans-Regular.ttf",
-        here / "assets" / "DejaVuSans.ttf",
-        here / "assets" / "NotoSans-Regular.ttf",
-        here / "assets" / "fonts" / "DejaVuSans.ttf",
-        here / "assets" / "fonts" / "NotoSans-Regular.ttf",
-    ]
-    for p in candidates:
+    # Try DejaVu first, then Noto
+    return {
+        "regular": [
+            here / "DejaVuSans.ttf",
+            here / "assets" / "DejaVuSans.ttf",
+            here / "assets" / "fonts" / "DejaVuSans.ttf",
+            here / "NotoSans-Regular.ttf",
+            here / "assets" / "NotoSans-Regular.ttf",
+            here / "assets" / "fonts" / "NotoSans-Regular.ttf",
+        ],
+        "bold": [
+            here / "DejaVuSans-Bold.ttf",
+            here / "assets" / "DejaVuSans-Bold.ttf",
+            here / "assets" / "fonts" / "DejaVuSans-Bold.ttf",
+            here / "NotoSans-Bold.ttf",
+            here / "assets" / "NotoSans-Bold.ttf",
+            here / "assets" / "fonts" / "NotoSans-Bold.ttf",
+        ],
+        "italic": [
+            here / "DejaVuSans-Oblique.ttf",
+            here / "assets" / "DejaVuSans-Oblique.ttf",
+            here / "assets" / "fonts" / "DejaVuSans-Oblique.ttf",
+            here / "NotoSans-Italic.ttf",
+            here / "assets" / "NotoSans-Italic.ttf",
+            here / "assets" / "fonts" / "NotoSans-Italic.ttf",
+        ],
+    }
+
+def _first_existing(paths):
+    for p in paths:
         if p.exists():
             return str(p)
     return None
@@ -156,24 +176,66 @@ def create_pdf() -> Tuple[FPDF, bool]:
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=15)
 
-    font_path = find_ttf_font()
-    if font_path:
+    cands = _font_candidates()
+    reg = _first_existing(cands["regular"])
+    if reg:
         try:
-            pdf.add_font("DejaVu", "", font_path, uni=True)
-            pdf.set_font("DejaVu", "", 12)
+            pdf.add_font("LMW", "", reg, uni=True)
+            st.session_state["font_family"] = "LMW"
+            st.session_state["font_bold"] = False
+            st.session_state["font_italic"] = False
+
+            bold = _first_existing(cands["bold"])
+            if bold:
+                try:
+                    pdf.add_font("LMW", "B", bold, uni=True)
+                    st.session_state["font_bold"] = True
+                except Exception:
+                    pass
+            ita = _first_existing(cands["italic"])
+            if ita:
+                try:
+                    pdf.add_font("LMW", "I", ita, uni=True)
+                    st.session_state["font_italic"] = True
+                except Exception:
+                    pass
+
+            pdf.set_font("LMW", "", 12)
             st.session_state["unicode_font_loaded"] = True
             return pdf, True
         except Exception as e:
-            st.warning(f"Could not load TTF font ({font_path}). Falling back to core font. {e}")
+            st.warning(f"Could not load TTF font ({reg}). Falling back to core font. {e}")
 
     # Fallback: core Helvetica (Latin-1 only); we’ll sanitize strings
     pdf.set_font("Helvetica", "", 12)
+    st.session_state["font_family"] = "Helvetica"
+    st.session_state["font_bold"] = True
+    st.session_state["font_italic"] = True
     st.session_state["unicode_font_loaded"] = False
     return pdf, False
 
 def T(s: str) -> str:
     """Text pass-through that sanitizes only if we don't have a Unicode font."""
     return s if st.session_state.get("unicode_font_loaded") else safe_text(s)
+
+def setf(pdf: FPDF, style: str = "", size: int = 12):
+    """Smart set_font that respects which TTF styles are available."""
+    if st.session_state.get("unicode_font_loaded"):
+        fam = st.session_state.get("font_family", "LMW")
+        want_b = "B" in (style or "")
+        want_i = "I" in (style or "")
+        style_eff = ""
+        if want_b and st.session_state.get("font_bold"):
+            style_eff += "B"
+        if want_i and st.session_state.get("font_italic"):
+            style_eff += "I"
+        try:
+            pdf.set_font(fam, style_eff, size)
+        except Exception:
+            pdf.set_font(fam, "", size)
+    else:
+        # Core fonts support synthetic styles
+        pdf.set_font("Helvetica", style or "", size)
 
 # -------- Robust width-aware MultiCell wrapper (prevents FPDFException) --------
 def _effective_line_width(pdf: "FPDF") -> float:
@@ -202,14 +264,12 @@ def mc(pdf: "FPDF", text: str, h: float = 6):
         if line.strip() != "":
             pdf.multi_cell(0, h, line.rstrip())
         elif line != "":
-            # preserve blank lines if they were intentional
             pdf.multi_cell(0, h, "")
         line = ""
 
     for tok in words:
         if tok is None:
             continue
-        # whitespace: try to append as-is
         if tok.isspace():
             candidate = line + tok
             if pdf.get_string_width(candidate) <= max_w:
@@ -218,7 +278,6 @@ def mc(pdf: "FPDF", text: str, h: float = 6):
                 flush_line()
             continue
 
-        # normal token fits?
         if pdf.get_string_width(tok) <= max_w:
             candidate = line + tok
             if pdf.get_string_width(candidate) <= max_w:
@@ -228,7 +287,6 @@ def mc(pdf: "FPDF", text: str, h: float = 6):
                 line = tok
             continue
 
-        # token too wide -> split by width (binary search chunks)
         i, n = 0, len(tok)
         while i < n:
             lo, hi, fit = 1, n - i, 1
@@ -421,14 +479,16 @@ def ai_sections_and_weights(
                 if raw.startswith("```"):
                     raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
                     raw = re.sub(r"\n```$", "", raw)
+                # Parse flexibly (sometimes models wrap or add commentary)
+                data = None
                 try:
                     data = json.loads(raw)
                 except Exception:
                     if "{" in raw and "}" in raw:
                         raw2 = raw[raw.find("{"): raw.rfind("}") + 1]
                         data = json.loads(raw2)
-                    else:
-                        raise ValueError("No JSON object found in completion.")
+                if not isinstance(data, dict):
+                    raise ValueError("No JSON object found in completion.")
                 st.session_state["ai_debug"] = {
                     "path": last_path,
                     "cap_used": cap_used,
@@ -449,62 +509,64 @@ def ai_sections_and_weights(
                     Path("/tmp/last_ai.json").write_text(raw, encoding="utf-8")
                 except Exception:
                     pass
-                break
+                # ---- normalize fields defensively (no KeyError explosions) ----
+                out = {
+                    "archetype": str(data.get("archetype", "")),
+                    "core_need": str(data.get("core_need", "")),
+                    "deep_insight": str(data.get("deep_insight", "")),
+                    "why_now": str(data.get("why_now", "")),
+                    "strengths": [str(x) for x in (data.get("strengths") or [])][:6],
+                    "energizers": [str(x) for x in (data.get("energizers") or [])][:4],
+                    "drainers": [str(x) for x in (data.get("drainers") or [])][:4],
+                    "tensions": [str(x) for x in (data.get("tensions") or [])][:3],
+                    "blindspot": str(data.get("blindspot", "")),
+                    "actions": [str(x) for x in (data.get("actions") or [])][:3],
+                    "if_then": [str(x) for x in (data.get("if_then") or [])][:3],
+                    "weekly_plan": [str(x) for x in (data.get("weekly_plan") or [])][:7],
+                    "affirmation": str(data.get("affirmation", "")),
+                    "quote": str(data.get("quote", "")),
+                    "signature_metaphor": str(data.get("signature_metaphor", "")),
+                    "signature_sentence": str(data.get("signature_sentence", "")),
+                    "top_theme_boosters": [str(x) for x in (data.get("top_theme_boosters") or [])][:4],
+                    "pitfalls": [str(x) for x in (data.get("pitfalls") or [])][:4],
+                    "future_snapshot": str(data.get("future_snapshot", "")),
+                    "weights": {},
+                    "from_words": {},
+                    "micro_pledge": str(data.get("micro_pledge", "")),
+                }
+                fw = data.get("from_words") or {}
+                if isinstance(fw, dict):
+                    out["from_words"] = {
+                        "themes": [str(x) for x in (fw.get("themes") or [])][:3],
+                        "quotes": [str(x) for x in (fw.get("quotes") or [])][:3],
+                        "insight": str(fw.get("insight", "")),
+                        "ritual": str(fw.get("ritual", "")),
+                        "relationship_moment": str(fw.get("relationship_moment", "")),
+                        "stress_reset": str(fw.get("stress_reset", "")),
+                    }
+                weights = data.get("weights") or {}
+                if isinstance(weights, dict):
+                    for qid, w in weights.items():
+                        if not isinstance(w, dict):
+                            continue
+                        clean = {}
+                        for theme, val in w.items():
+                            if theme in THEMES:
+                                try:
+                                    iv = int(val)
+                                    iv = max(-2, min(2, iv))
+                                    clean[theme] = iv
+                                except Exception:
+                                    pass
+                        if clean:
+                            out["weights"][str(qid)] = clean
+                return out
             except Exception as e:
                 last_err = e
                 continue
         else:
             st.session_state["ai_debug"] = {"error": f"{type(last_err).__name__}: {last_err}", "path": last_path}
             return None
-
-        out = {
-            "archetype": str(data.get("archetype", "")),
-            "core_need": str(data.get("core_need", "")),
-            "deep_insight": str(data.get("deep_insight", "")),
-            "why_now": str(data.get("why_now", "")),
-            "strengths": [str(x) for x in (data.get("strengths") or [])][:6],
-            "energizers": [str(x) for x in (data.get("energizers") or [])][:4],
-            "drainers": [str(x) for x in (data.get("drainers") or [])][:4],
-            "tensions": [str(x) for x in (data.get("tensions") or [])][:3],
-            "blindspot": str(data.get("blindspot", "")),
-            "actions": [str(x) for x in (data.get("actions") or [])][:3],
-            "if_then": [str(x) for x in (data.get("if_then") or [])][:3],
-            "weekly_plan": [str(x) for x in (data.get("weekly_plan") or [])][:7],
-            "affirmation": str(data.get("affirmation", "")),
-            "quote": str(data.get("quote", "")),
-            "signature_metaphor": str(data.get("signature_metaphor", "")),
-            "signature_sentence": str(data.get("signature_sentence", "")),
-            "top_theme_boosters": [str(x) for x in (data.get("top_theme_boosters") or [])][:4],
-            "pitfalls": [str(x) for x in (data.get("pitfalls") or [])][:4],
-            "future_snapshot": str(data.get("future_snapshot", "")),
-            "weights": {},
-            "from_words": {},
-            "micro_pledge": str(data.get("micro_pledge", "")),
-        }
-        fw = data.get("from_words") or {}
-        out["from_words"] = {
-            "themes": [str(x) for x in (fw.get("themes") or [])][:3],
-            "quotes": [str(x) for x in (fw.get("quotes") or [])][:3],
-            "insight": str(fw.get("insight", "")),
-            "ritual": str(fw.get("ritual", "")),
-            "relationship_moment": str(fw.get("relationship_moment", "")),
-            "stress_reset": str(fw.get("stress_reset", "")),
-        }
-        weights = data.get("weights") or {}
-        for qid, w in weights.items():
-            clean = {}
-            if isinstance(w, dict):
-                for theme, val in w.items():
-                    if theme in THEMES:
-                        try:
-                            iv = int(val)
-                            iv = max(-2, min(2, iv))
-                            clean[theme] = iv
-                        except Exception:
-                            pass
-            if clean:
-                out["weights"][str(qid)] = clean
-        return out
     except Exception as e:
         st.session_state["ai_debug"] = {"fatal": f"{type(e).__name__}: {e}"}
         return None
@@ -545,11 +607,11 @@ def balancing_suggestion(theme: str) -> str:
     }
     return suggestions.get(theme, "Take one small, visible step this week.")
 
-# ---------------- PDF render helpers (use T()/mc() wrappers) ----------------
+# ---------------- PDF render helpers (use setf()/T()/mc()) ----------------
 def draw_scores_barchart(pdf: FPDF, scores: Dict[str, int]):
-    pdf.set_font("", "B", 14)
+    setf(pdf, "B", 14)
     pdf.cell(0, 8, T("Your Theme Snapshot"), ln=True)
-    pdf.set_font("", "", 12)
+    setf(pdf, "", 12)
     max_score = max(max(scores.values()), 1)
     bar_w_max = 120
     x_left = pdf.get_x() + 10
@@ -567,9 +629,9 @@ def draw_scores_barchart(pdf: FPDF, scores: Dict[str, int]):
     pdf.set_y(y + 4)
 
 def paragraph(pdf: FPDF, title: str, body: str):
-    pdf.set_font("", "B", 14)
+    setf(pdf, "B", 14)
     pdf.cell(0, 8, T(title), ln=True)
-    pdf.set_font("", "", 12)
+    setf(pdf, "", 12)
     for line in str(body).split("\n"):
         mc(pdf, line)
     pdf.ln(2)
@@ -582,17 +644,18 @@ def checkbox_line(pdf: FPDF, text: str):
     mc(pdf, text)
 
 def label_value(pdf: FPDF, label: str, value: str):
-    pdf.set_font("", "B", 12); pdf.cell(0, 6, T(label), ln=True)
-    pdf.set_font("", "", 12);  mc(pdf, value)
+    setf(pdf, "B", 12); pdf.cell(0, 6, T(label), ln=True)
+    setf(pdf, "", 12);  mc(pdf, value)
 
 def future_callout(pdf: FPDF, weeks: int, text: str):
     pdf.set_text_color(30, 60, 120)
-    pdf.set_font("", "B", 14)
+    setf(pdf, "B", 14)
     pdf.cell(0, 8, T(f"Future Snapshot — {weeks} weeks"), ln=True)
     pdf.set_text_color(0, 0, 0)
-    pdf.set_font("", "I", 12)
+    setf(pdf, "I", 12)
     mc(pdf, text)
     pdf.ln(2)
+    setf(pdf, "", 12)
 
 def left_bar_callout(pdf: FPDF, title: str, body: str, bullets=None):
     if bullets is None:
@@ -602,10 +665,10 @@ def left_bar_callout(pdf: FPDF, title: str, body: str, bullets=None):
     pdf.set_fill_color(30, 144, 255)   # left bar
     pdf.rect(x, y, 2, 6, "F")
     pdf.set_x(x + 4)
-    pdf.set_font("", "B", 13)
+    setf(pdf, "B", 13)
     pdf.cell(0, 6, T(title), ln=True)
     pdf.set_x(x + 4)
-    pdf.set_font("", "", 12)
+    setf(pdf, "", 12)
     mc(pdf, body)
     for b in bullets:
         pdf.set_x(x + 4)
@@ -624,9 +687,9 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         except Exception:
             pass
 
-    pdf.set_font("", "B", 18)
+    setf(pdf, "B", 18)
     pdf.cell(0, 10, T(REPORT_TITLE), ln=True)
-    pdf.set_font("", "", 12)
+    setf(pdf, "", 12)
     today = datetime.date.today().strftime("%d %b %Y")
     greet = f"Hi {first_name}," if first_name else "Hello,"
     pdf.cell(0, 8, T(greet), ln=True)
@@ -644,21 +707,21 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
             label_value(pdf, "Signature Sentence", sections.get("signature_sentence",""))
         pdf.ln(1)
 
-    pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Top Themes"), ln=True)
-    pdf.set_font("", "", 12);  mc(pdf, ", ".join(top3)); pdf.ln(1)
+    setf(pdf, "B", 14); pdf.cell(0, 8, T("Top Themes"), ln=True)
+    setf(pdf, "", 12);  mc(pdf, ", ".join(top3)); pdf.ln(1)
 
     draw_scores_barchart(pdf, scores)
 
     fw = sections.get("from_words") or {}
-    if fw and (fw.get("insight") or fw.get("themes") or fw.get("quotes")):
+    if isinstance(fw, dict) and (fw.get("insight") or fw.get("themes") or fw.get("quotes")):
         quotes = [f'"{q}"' for q in fw.get("quotes", []) if q]
         left_bar_callout(pdf, "From your words", fw.get("insight",""), bullets=quotes)
         keep = [("Daily ritual", fw.get("ritual","")),
                 ("Connection moment", fw.get("relationship_moment","")),
                 ("Stress reset", fw.get("stress_reset",""))]
         if any(v for _, v in keep):
-            pdf.set_font("", "B", 12); pdf.cell(0, 6, T("One-liners to keep"), ln=True)
-            pdf.set_font("", "", 12)
+            setf(pdf, "B", 12); pdf.cell(0, 6, T("One-liners to keep"), ln=True)
+            setf(pdf, "", 12)
             for lbl, val in keep:
                 if val: mc(pdf, f"{lbl}: {val}")
             pdf.ln(1)
@@ -675,28 +738,28 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         future_callout(pdf, sections.get("horizon_weeks", 4), sections["future_snapshot"])
 
     if sections.get("strengths"):
-        pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Signature strengths"), ln=True)
-        pdf.set_font("", "", 12)
+        setf(pdf, "B", 14); pdf.cell(0, 8, T("Signature strengths"), ln=True)
+        setf(pdf, "", 12)
         for s in sections["strengths"]:
             pdf.cell(4, 6, T("*")); mc(pdf, s)
         pdf.ln(1)
 
     if sections.get("energizers") or sections.get("drainers"):
-        pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Energy map"), ln=True)
-        pdf.set_font("", "B", 12); pdf.cell(0, 6, T("Energizers"), ln=True)
-        pdf.set_font("", "", 12)
+        setf(pdf, "B", 14); pdf.cell(0, 8, T("Energy map"), ln=True)
+        setf(pdf, "B", 12); pdf.cell(0, 6, T("Energizers"), ln=True)
+        setf(pdf, "", 12)
         for e in sections.get("energizers", []):
             pdf.cell(4, 6, T("+")); mc(pdf, e)
         pdf.ln(1)
-        pdf.set_font("", "B", 12); pdf.cell(0, 6, T("Drainers"), ln=True)
-        pdf.set_font("", "", 12)
+        setf(pdf, "B", 12); pdf.cell(0, 6, T("Drainers"), ln=True)
+        setf(pdf, "", 12)
         for d in sections.get("drainers", []):
             pdf.cell(4, 6, T("-")); mc(pdf, d)
         pdf.ln(1)
 
     if sections.get("tensions"):
-        pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Hidden tensions"), ln=True)
-        pdf.set_font("", "", 12)
+        setf(pdf, "B", 14); pdf.cell(0, 8, T("Hidden tensions"), ln=True)
+        setf(pdf, "", 12)
         for t in sections["tensions"]:
             pdf.cell(4, 6, T("*")); mc(pdf, t)
         pdf.ln(1)
@@ -704,62 +767,63 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         label_value(pdf, "Watch-out (gentle blind spot)", sections["blindspot"]); pdf.ln(1)
 
     if sections.get("actions"):
-        pdf.set_font("", "B", 14); pdf.cell(0, 8, T("3 next-step actions (7 days)"), ln=True)
-        pdf.set_font("", "", 12)
+        setf(pdf, "B", 14); pdf.cell(0, 8, T("3 next-step actions (7 days)"), ln=True)
+        setf(pdf, "", 12)
         for a in sections["actions"]:
             checkbox_line(pdf, a)
         pdf.ln(1)
 
     if sections.get("if_then"):
-        pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Implementation intentions (If–Then)"), ln=True)
-        pdf.set_font("", "", 12)
+        setf(pdf, "B", 14); pdf.cell(0, 8, T("Implementation intentions (If–Then)"), ln=True)
+        setf(pdf, "", 12)
         for it in sections.get("if_then", []):
             pdf.cell(4, 6, T("*")); mc(pdf, it)
         pdf.ln(1)
 
     if sections.get("weekly_plan"):
-        pdf.set_font("", "B", 14); pdf.cell(0, 8, T("1-week gentle plan"), ln=True)
-        pdf.set_font("", "", 12)
+        setf(pdf, "B", 14); pdf.cell(0, 8, T("1-week gentle plan"), ln=True)
+        setf(pdf, "", 12)
         for i, item in enumerate(sections["weekly_plan"][:7]):
             pdf.cell(0, 6, T(f"Day {i+1}: {item}"), ln=True)
         pdf.ln(1)
 
     lows = [name for name, _ in sorted(scores.items(), key=lambda x: x[1])[:2]]
     if lows:
-        pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Balancing Opportunity"), ln=True)
-        pdf.set_font("", "", 12)
+        setf(pdf, "B", 14); pdf.cell(0, 8, T("Balancing Opportunity"), ln=True)
+        setf(pdf, "", 12)
         for theme in lows:
             tip = balancing_suggestion(theme)
             mc(pdf, f"{theme}: {tip}")
         pdf.ln(1)
 
     if sections.get("top_theme_boosters") or sections.get("pitfalls"):
-        pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Amplify what works / Avoid what trips you"), ln=True)
+        setf(pdf, "B", 14); pdf.cell(0, 8, T("Amplify what works / Avoid what trips you"), ln=True)
         if sections.get("top_theme_boosters"):
-            pdf.set_font("", "B", 12); pdf.cell(0, 6, T("Boosters"), ln=True)
-            pdf.set_font("", "", 12)
+            setf(pdf, "B", 12); pdf.cell(0, 6, T("Boosters"), ln=True)
+            setf(pdf, "", 12)
             for b in sections.get("top_theme_boosters", []):
                 pdf.cell(4, 6, T("*")); mc(pdf, b)
         if sections.get("pitfalls"):
-            pdf.set_font("", "B", 12); pdf.cell(0, 6, T("Pitfalls"), ln=True)
-            pdf.set_font("", "", 12)
+            setf(pdf, "B", 12); pdf.cell(0, 6, T("Pitfalls"), ln=True)
+            setf(pdf, "", 12)
             for p in sections.get("pitfalls", []):
                 pdf.cell(4, 6, T("-")); mc(pdf, p)
         pdf.ln(1)
 
     if sections.get("affirmation") or sections.get("quote"):
-        pdf.set_font("", "B", 12); pdf.cell(0, 6, T("Keep this in view"), ln=True)
-        pdf.set_font("", "I", 11)
+        setf(pdf, "B", 12); pdf.cell(0, 6, T("Keep this in view"), ln=True)
+        setf(pdf, "I", 11)
         if sections.get("affirmation"):
             mc(pdf, f"Affirmation: {sections['affirmation']}")
         if sections.get("quote"):
             qtext = f"\"{sections['quote']}\""
             mc(pdf, qtext)
         pdf.ln(2)
+        setf(pdf, "", 12)
 
     if free_responses:
-        pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Your words we heard"), ln=True)
-        pdf.set_font("", "", 12)
+        setf(pdf, "B", 14); pdf.cell(0, 8, T("Your words we heard"), ln=True)
+        setf(pdf, "", 12)
         for fr in free_responses:
             if not fr.get("answer"):
                 continue
@@ -768,13 +832,13 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
             pdf.ln(1)
 
     pdf.ln(3)
-    pdf.set_font("", "B", 12)
+    setf(pdf, "B", 12)
     mc(pdf, "On the next page: a printable 'Signature Week — At a glance' checklist you can use right away.")
 
     pdf.add_page()
-    pdf.set_font("", "B", 16)
+    setf(pdf, "B", 16)
     pdf.cell(0, 10, T("Signature Week — At a glance"), ln=True)
-    pdf.set_font("", "", 12)
+    setf(pdf, "", 12)
     mc(pdf, "A simple plan you can print or screenshot. Check items off as you go.")
     pdf.ln(2)
 
@@ -790,8 +854,8 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         mc(pdf, f"Day {i+1}: {item}")
 
     pdf.ln(2)
-    pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Tiny Progress Tracker"), ln=True)
-    pdf.set_font("", "", 12)
+    setf(pdf, "B", 14); pdf.cell(0, 8, T("Tiny Progress Tracker"), ln=True)
+    setf(pdf, "", 12)
     milestones = sections.get("actions") or [
         "Choose one tiny step and schedule it.",
         "Tell a friend your plan for gentle accountability.",
@@ -805,8 +869,9 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         mc(pdf, m)
     pdf.ln(2)
 
-    pdf.set_font("", "I", 10); pdf.ln(2)
+    setf(pdf, "I", 10); pdf.ln(2)
     mc(pdf, "Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice.")
+    setf(pdf, "", 12)
 
     raw = pdf.output(dest="S")
     if isinstance(raw, str):
