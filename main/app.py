@@ -9,7 +9,6 @@ from typing import Dict, List, Tuple, Optional
 
 import streamlit as st
 from PIL import Image
-# >>> Unicode-capable PDF engine
 from fpdf import FPDF  # fpdf2
 
 APP_TITLE = "Life Minus Work — Reflection Quiz (15 questions)"
@@ -175,6 +174,34 @@ def create_pdf() -> Tuple[FPDF, bool]:
 def T(s: str) -> str:
     """Text pass-through that sanitizes only if we don't have a Unicode font."""
     return s if st.session_state.get("unicode_font_loaded") else safe_text(s)
+
+# -------- Long-token-safe wrapper for MultiCell (prevents FPDFException) --------
+def wrap_long_tokens(text: str, limit: int = 50) -> str:
+    """
+    If a token has no spaces and is longer than `limit`, insert spaces every `limit`
+    chars so fpdf2 can line-break safely.
+    """
+    s = str(text or "")
+    parts = re.split(r"(\s+)", s)  # keep whitespace separators
+    out = []
+    for p in parts:
+        if not p or p.isspace():
+            out.append(p)
+            continue
+        if len(p) <= limit:
+            out.append(p)
+        else:
+            chunks = [p[i:i+limit] for i in range(0, len(p), limit)]
+            out.append(" ".join(chunks))
+    return "".join(out)
+
+def mc(pdf: FPDF, text: str, h: float = 6):
+    """Safe multi-cell: Unicode if font loaded, else sanitize + hard-wrap long tokens."""
+    s = T(text)
+    try:
+        pdf.multi_cell(0, h, s)
+    except Exception:
+        pdf.multi_cell(0, h, T(wrap_long_tokens(s)))
 
 # ---------------- OpenAI wrapper (no temp / correct token params) ----------------
 def _call_openai_json(model: str, system: str, user: str, cap: int):
@@ -469,7 +496,7 @@ def balancing_suggestion(theme: str) -> str:
     }
     return suggestions.get(theme, "Take one small, visible step this week.")
 
-# ---------------- PDF render helpers (use T() wrapper) ----------------
+# ---------------- PDF render helpers (use T()/mc() wrappers) ----------------
 def draw_scores_barchart(pdf: FPDF, scores: Dict[str, int]):
     pdf.set_font("", "B", 14)
     pdf.cell(0, 8, T("Your Theme Snapshot"), ln=True)
@@ -495,7 +522,7 @@ def paragraph(pdf: FPDF, title: str, body: str):
     pdf.cell(0, 8, T(title), ln=True)
     pdf.set_font("", "", 12)
     for line in str(body).split("\n"):
-        pdf.multi_cell(0, 6, T(line))
+        mc(pdf, line)
     pdf.ln(2)
 
 def checkbox_line(pdf: FPDF, text: str):
@@ -503,11 +530,11 @@ def checkbox_line(pdf: FPDF, text: str):
     y = pdf.get_y()
     pdf.rect(x, y + 1.5, 4, 4)
     pdf.set_x(x + 6)
-    pdf.multi_cell(0, 6, T(text))
+    mc(pdf, text)
 
 def label_value(pdf: FPDF, label: str, value: str):
     pdf.set_font("", "B", 12); pdf.cell(0, 6, T(label), ln=True)
-    pdf.set_font("", "", 12);  pdf.multi_cell(0, 6, T(value))
+    pdf.set_font("", "", 12);  mc(pdf, value)
 
 def future_callout(pdf: FPDF, weeks: int, text: str):
     pdf.set_text_color(30, 60, 120)
@@ -515,7 +542,7 @@ def future_callout(pdf: FPDF, weeks: int, text: str):
     pdf.cell(0, 8, T(f"Future Snapshot — {weeks} weeks"), ln=True)
     pdf.set_text_color(0, 0, 0)
     pdf.set_font("", "I", 12)
-    pdf.multi_cell(0, 6, T(text))
+    mc(pdf, text)
     pdf.ln(2)
 
 def left_bar_callout(pdf: FPDF, title: str, body: str, bullets=None):
@@ -530,11 +557,11 @@ def left_bar_callout(pdf: FPDF, title: str, body: str, bullets=None):
     pdf.cell(0, 6, T(title), ln=True)
     pdf.set_x(x + 4)
     pdf.set_font("", "", 12)
-    pdf.multi_cell(0, 6, T(body))
+    mc(pdf, body)
     for b in bullets:
         pdf.set_x(x + 4)
         pdf.cell(4, 6, T("•"))
-        pdf.multi_cell(0, 6, T(b))
+        mc(pdf, b)
     pdf.ln(1)
 
 def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: List[str],
@@ -569,7 +596,7 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         pdf.ln(1)
 
     pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Top Themes"), ln=True)
-    pdf.set_font("", "", 12);  pdf.multi_cell(0, 6, T(", ".join(top3))); pdf.ln(1)
+    pdf.set_font("", "", 12);  mc(pdf, ", ".join(top3)); pdf.ln(1)
 
     draw_scores_barchart(pdf, scores)
 
@@ -584,7 +611,7 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
             pdf.set_font("", "B", 12); pdf.cell(0, 6, T("One-liners to keep"), ln=True)
             pdf.set_font("", "", 12)
             for lbl, val in keep:
-                if val: pdf.multi_cell(0, 6, T(f"{lbl}: {val}"))
+                if val: mc(pdf, f"{lbl}: {val}")
             pdf.ln(1)
     if sections.get("micro_pledge"):
         label_value(pdf, "Personal pledge", sections["micro_pledge"]); pdf.ln(1)
@@ -602,7 +629,7 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Signature strengths"), ln=True)
         pdf.set_font("", "", 12)
         for s in sections["strengths"]:
-            pdf.cell(4, 6, T("*")); pdf.multi_cell(0, 6, T(s))
+            pdf.cell(4, 6, T("*")); mc(pdf, s)
         pdf.ln(1)
 
     if sections.get("energizers") or sections.get("drainers"):
@@ -610,19 +637,19 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         pdf.set_font("", "B", 12); pdf.cell(0, 6, T("Energizers"), ln=True)
         pdf.set_font("", "", 12)
         for e in sections.get("energizers", []):
-            pdf.cell(4, 6, T("+")); pdf.multi_cell(0, 6, T(e))
+            pdf.cell(4, 6, T("+")); mc(pdf, e)
         pdf.ln(1)
         pdf.set_font("", "B", 12); pdf.cell(0, 6, T("Drainers"), ln=True)
         pdf.set_font("", "", 12)
         for d in sections.get("drainers", []):
-            pdf.cell(4, 6, T("-")); pdf.multi_cell(0, 6, T(d))
+            pdf.cell(4, 6, T("-")); mc(pdf, d)
         pdf.ln(1)
 
     if sections.get("tensions"):
         pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Hidden tensions"), ln=True)
         pdf.set_font("", "", 12)
         for t in sections["tensions"]:
-            pdf.cell(4, 6, T("*")); pdf.multi_cell(0, 6, T(t))
+            pdf.cell(4, 6, T("*")); mc(pdf, t)
         pdf.ln(1)
     if sections.get("blindspot"):
         label_value(pdf, "Watch-out (gentle blind spot)", sections["blindspot"]); pdf.ln(1)
@@ -638,7 +665,7 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Implementation intentions (If–Then)"), ln=True)
         pdf.set_font("", "", 12)
         for it in sections.get("if_then", []):
-            pdf.cell(4, 6, T("*")); pdf.multi_cell(0, 6, T(it))
+            pdf.cell(4, 6, T("*")); mc(pdf, it)
         pdf.ln(1)
 
     if sections.get("weekly_plan"):
@@ -654,7 +681,7 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         pdf.set_font("", "", 12)
         for theme in lows:
             tip = balancing_suggestion(theme)
-            pdf.multi_cell(0, 6, T(f"{theme}: {tip}"))
+            mc(pdf, f"{theme}: {tip}")
         pdf.ln(1)
 
     if sections.get("top_theme_boosters") or sections.get("pitfalls"):
@@ -663,22 +690,22 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
             pdf.set_font("", "B", 12); pdf.cell(0, 6, T("Boosters"), ln=True)
             pdf.set_font("", "", 12)
             for b in sections.get("top_theme_boosters", []):
-                pdf.cell(4, 6, T("*")); pdf.multi_cell(0, 6, T(b))
+                pdf.cell(4, 6, T("*")); mc(pdf, b)
         if sections.get("pitfalls"):
             pdf.set_font("", "B", 12); pdf.cell(0, 6, T("Pitfalls"), ln=True)
             pdf.set_font("", "", 12)
             for p in sections.get("pitfalls", []):
-                pdf.cell(4, 6, T("-")); pdf.multi_cell(0, 6, T(p))
+                pdf.cell(4, 6, T("-")); mc(pdf, p)
         pdf.ln(1)
 
     if sections.get("affirmation") or sections.get("quote"):
         pdf.set_font("", "B", 12); pdf.cell(0, 6, T("Keep this in view"), ln=True)
         pdf.set_font("", "I", 11)
         if sections.get("affirmation"):
-            pdf.multi_cell(0, 6, T(f"Affirmation: {sections['affirmation']}"))
+            mc(pdf, f"Affirmation: {sections['affirmation']}")
         if sections.get("quote"):
             qtext = f"\"{sections['quote']}\""
-            pdf.multi_cell(0, 6, T(qtext))
+            mc(pdf, qtext)
         pdf.ln(2)
 
     if free_responses:
@@ -687,19 +714,19 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         for fr in free_responses:
             if not fr.get("answer"):
                 continue
-            pdf.multi_cell(0, 6, T(f"• {fr.get('question','')}"))
-            pdf.multi_cell(0, 6, T(f"  {fr.get('answer','')}"))
+            mc(pdf, f"• {fr.get('question','')}")
+            mc(pdf, f"  {fr.get('answer','')}")
             pdf.ln(1)
 
     pdf.ln(3)
     pdf.set_font("", "B", 12)
-    pdf.multi_cell(0, 6, T("On the next page: a printable 'Signature Week — At a glance' checklist you can use right away."))
+    mc(pdf, "On the next page: a printable 'Signature Week — At a glance' checklist you can use right away.")
 
     pdf.add_page()
     pdf.set_font("", "B", 16)
     pdf.cell(0, 10, T("Signature Week — At a glance"), ln=True)
     pdf.set_font("", "", 12)
-    pdf.multi_cell(0, 6, T("A simple plan you can print or screenshot. Check items off as you go."))
+    mc(pdf, "A simple plan you can print or screenshot. Check items off as you go.")
     pdf.ln(2)
 
     week_items = sections.get("weekly_plan") or []
@@ -711,7 +738,7 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         y = pdf.get_y()
         pdf.rect(x, y + 1.5, 4, 4)
         pdf.set_x(x + 6)
-        pdf.multi_cell(0, 6, T(f"Day {i+1}: {item}"))
+        mc(pdf, f"Day {i+1}: {item}")
 
     pdf.ln(2)
     pdf.set_font("", "B", 14); pdf.cell(0, 8, T("Tiny Progress Tracker"), ln=True)
@@ -726,13 +753,12 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         y = pdf.get_y()
         pdf.rect(x, y + 1.5, 4, 4)
         pdf.set_x(x + 6)
-        pdf.multi_cell(0, 6, T(m))
+        mc(pdf, m)
     pdf.ln(2)
 
     pdf.set_font("", "I", 10); pdf.ln(2)
-    pdf.multi_cell(0, 5, T("Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice."))
+    mc(pdf, "Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice.")
 
-    # fpdf2 returns bytes for dest="S"; if str, encode
     raw = pdf.output(dest="S")
     if isinstance(raw, str):
         raw = raw.encode("latin-1")
