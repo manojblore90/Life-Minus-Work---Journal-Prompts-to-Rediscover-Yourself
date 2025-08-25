@@ -9,4 +9,4 @@ fpdf==1.7.2
 Pillow>=10.3.0
 
 # OpenAI Python SDK (Responses API). This pulls httpx & pydantic automatically.
-openai>=1.35.0
+openai>=1.60.0
