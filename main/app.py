@@ -1,5 +1,5 @@
-# app.py — Life Minus Work (stable form + stable AI + stable PDF on fpdf 1.7.2)
-# ----------------------------------------------------------------
+# app.py — Life Minus Work (stable form + robust AI JSON + fpdf 1.7.2)
+# -------------------------------------------------------------------
 import os, sys, re, json, unicodedata, datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -23,8 +23,8 @@ st.set_page_config(page_title=APP_TITLE, page_icon="✨", layout="centered")
 
 def get_secret(name: str, default: str = "") -> str:
     try:
-        if name in st.secrets:
-            return str(st.secrets[name])
+        if name in st.secrets:  # type: ignore[attr-defined]
+            return str(st.secrets[name])  # type: ignore[attr-defined]
     except Exception:
         pass
     return os.getenv(name, default)
@@ -34,7 +34,7 @@ if OPENAI_API_KEY:
     os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
 USE_AI = bool(OPENAI_API_KEY and OpenAI)
-HIGH_MODEL = get_secret("OPENAI_HIGH_MODEL", "gpt-5-mini")  # last-good model path
+HIGH_MODEL = get_secret("OPENAI_HIGH_MODEL", "gpt-5-mini")
 MAX_TOK_HIGH = int(get_secret("MAX_OUTPUT_TOKENS_HIGH", "8000"))
 FALLBACK_CAP = int(get_secret("MAX_OUTPUT_TOKENS_FALLBACK", "7000"))
 
@@ -66,7 +66,7 @@ def clean_text(s: str, max_len: int = 1000, ascii_fallback: bool = False) -> str
         s = str(s)
     s = unicodedata.normalize("NFKC", s)
     s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", s)  # strip control chars
-    # guard against super-long tokens that can break line breaking
+    # guard super-long tokens (can crash fpdf line breaking)
     tokens = []
     for t in s.split():
         tokens.append(t if len(t) <= max_len else t[:max_len] + "...")
@@ -94,22 +94,17 @@ def mc(pdf: "FPDF", text: str, h: float = 6, unicode_ok: bool = False):
     s = clean_text((text or "").replace("\r\n", "\n").replace("\r", "\n"),
                    ascii_fallback=not unicode_ok)
 
-    # Try 1: as-is (likely ASCII already)
     try:
         pdf.multi_cell(w, h, s)
         return
     except Exception:
         pass
-
-    # Try 2: forced ASCII
     try:
         s2 = clean_text(s, ascii_fallback=True)
         pdf.multi_cell(w, h, s2)
         return
     except Exception:
         pass
-
-    # Try 3: core font + safe line
     try:
         pdf.set_font("Helvetica", "", 12)
     except Exception:
@@ -489,10 +484,9 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 
-    # IMPORTANT: set core font before any text
+    # important: set core font before any text
     setf(pdf, "B", 18)
 
-    # Logo
     if logo_path:
         try:
             pdf.image(logo_path, w=40); pdf.ln(2)
@@ -663,7 +657,6 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
     mc(pdf, "Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice.")
     setf(pdf, "", 12)
 
-    # fpdf 1.7.2 returns STR (latin-1) with dest="S"
     raw = pdf.output(dest="S")
     return raw.encode("latin-1", errors="replace") if isinstance(raw, str) else to_bytes(raw)
 
@@ -689,7 +682,7 @@ if "answers" not in st.session_state:
 with st.expander("Personalization options"):
     horizon_weeks = st.slider("Future snapshot horizon (weeks)", 2, 8, 4)
 
-# === Questionnaire (stable; no mid-way wipes) ===
+# === Questionnaire (stable; clean write-in UX) ===
 with st.form("quiz_form", clear_on_submit=False):
     pending_answers = {}
 
@@ -699,18 +692,19 @@ with st.form("quiz_form", clear_on_submit=False):
 
         base_options = [c["label"] for c in q["choices"]]
         write_in_label = "✍️ I'll write my own answer"
-        options = base_options + [write_in_label]
+        placeholder = "— Select —"
+        options = [placeholder] + base_options + [write_in_label]
 
         saved = st.session_state["answers"].get(qid, {})
         saved_idx = saved.get("choice_idx", None)
         saved_free = saved.get("free_text", "")
 
         if isinstance(saved_idx, int) and 0 <= saved_idx < len(base_options):
-            radio_index = saved_idx
+            radio_index = 1 + saved_idx  # offset by placeholder
         elif saved_free:
-            radio_index = len(options) - 1
+            radio_index = len(options) - 1  # write-in selected
         else:
-            radio_index = None
+            radio_index = 0  # placeholder
 
         choice_label = st.radio(
             "Choose one:",
@@ -720,18 +714,23 @@ with st.form("quiz_form", clear_on_submit=False):
         )
 
         use_free = (choice_label == write_in_label)
-        free_val = st.text_area(
-            "Your answer",
-            value=saved_free,
-            key=f"{qid}_free_text",
-            height=80,
-            disabled=not use_free,
-            placeholder="Type your own response…",
-        )
 
+        free_val = saved_free
         if use_free:
+            free_val = st.text_area(
+                "Your answer",
+                value=saved_free,
+                key=f"{qid}_free_text",
+                height=80,
+                placeholder="Type your own response…",
+            )
+
+        if choice_label == placeholder:
             choice_idx = None
-            free_text = free_val.strip()
+            free_text = ""
+        elif use_free:
+            choice_idx = None
+            free_text = (free_val or "").strip()
         else:
             try:
                 choice_idx = base_options.index(choice_label)
