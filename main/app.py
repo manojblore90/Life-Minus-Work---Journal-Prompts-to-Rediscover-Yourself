@@ -257,28 +257,53 @@ def ai_sections_and_weights(scores, top3, free_responses, first_name, horizon_we
 
         score_lines = ", ".join([f"{k}: {v}" for k, v in scores.items()])
 
-        prompt = (
-            "You are a warm, practical life coach. Return ONLY valid JSON with keys:\n"
-            "  archetype, core_need,\n"
-            "  deep_insight (400–600 words, address user by first name),\n"
-            "  why_now (120–180 words),\n"
-            "  strengths (4–6), energizers (4), drainers (4), tensions (2–3), blindspot,\n"
-            "  actions (EXACTLY 3), if_then (EXACTLY 3), weekly_plan (7),\n"
-            "  affirmation (<=15 words), quote (<=20 words),\n"
-            "  signature_metaphor (<=12 words), signature_sentence (<=20 words),\n"
-            "  top_theme_boosters (<=4), pitfalls (<=4),\n"
-            "  future_snapshot (150–220 words, second-person, present tense, as if {h} weeks later),\n"
-            "  from_words { themes(3), quotes(2–3, <=12 words each), insight(80–120 words), ritual, relationship_moment, stress_reset },\n"
-            "  micro_pledge (first-person <=28 words),\n"
-            "  weights (question_id -> {theme:int in [-2,2]}).\n"
-            f"User first name: {first_name or 'Friend'}.\n"
-            f"Theme scores: {score_lines}.\n"
-            f"Top 3 themes: {', '.join(top3)}.\n"
-            f"Horizon weeks: {horizon_weeks}.\n"
-            f"Free-text answers: {json.dumps(packed, ensure_ascii=False)}\n"
-            "IMPORTANT: Only use question_id keys for 'weights' from this list:\n"
-            f"{json.dumps(allowed_ids, ensure_ascii=False)}\n"
-            "Tone: empathetic, encouraging, plain language. No medical claims. JSON only."
+prompt = f"""
+You are a warm, practical life coach. Return STRICT JSON ONLY matching this schema:
+
+{{
+  "archetype": string,
+  "core_need": string,
+  "deep_insight": string,              // 400–600 words, address user by first name
+  "why_now": string,                   // 120–180 words
+  "strengths": [string, ...],          // 4–6
+  "energizers": [string, ...],         // 4
+  "drainers": [string, ...],           // 4
+  "tensions": [string, ...],           // 2–3
+  "blindspot": string,
+  "actions": [string, string, string], // EXACTLY 3
+  "if_then": [string, string, string], // EXACTLY 3
+  "weekly_plan": [string, string, string, string, string, string, string], // 7
+  "affirmation": string,               // <= 15 words
+  "quote": string,                     // <= 20 words
+  "signature_metaphor": string,        // <= 12 words
+  "signature_sentence": string,        // <= 20 words
+  "top_theme_boosters": [string, ...], // <= 4
+  "pitfalls": [string, ...],           // <= 4
+  "future_snapshot": string,           // 150–220 words, second-person, present tense, as if {horizon_weeks} weeks later
+  "from_words": {{
+    "themes": [string, string, string],              // 3
+    "quotes": [string, string, string],              // 2–3, <= 12 words each
+    "insight": string,                               // 80–120 words
+    "ritual": string,
+    "relationship_moment": string,
+    "stress_reset": string
+  }},
+  "micro_pledge": string,              // first-person, <= 28 words
+  "weights": {{                        // question_id -> theme deltas in [-2,2]
+    "<question_id>": {{"Identity": int, "Growth": int, "Connection": int, "Peace": int, "Adventure": int, "Contribution": int}}
+  }}
+}}
+
+Return ONLY JSON. NO markdown, no preface.
+
+User first name: {first_name or 'Friend'}.
+Theme scores: {", ".join([f"{k}: {v}" for k,v in scores.items()])}.
+Top 3 themes: {", ".join(top3)}.
+Horizon weeks: {horizon_weeks}.
+Free-text answers (array of objects with id, q, a): {json.dumps(packed, ensure_ascii=False)}
+IMPORTANT: Only use these IDs as keys inside "weights": {json.dumps(allowed_ids, ensure_ascii=False)}
+Tone: empathetic, encouraging, plain language. No medical claims.
+"""
         ).format(h=horizon_weeks)
 
         system = "Reply with helpful coaching guidance as STRICT JSON only."
@@ -345,6 +370,21 @@ def ai_sections_and_weights(scores, top3, free_responses, first_name, horizon_we
                     "weights": {},
                 }
                 fw = data.get("from_words") or {}
+# Repair: sometimes the model wrongly returns one giant key for from_words
+if isinstance(fw, dict) and len(fw) == 1:
+    only_key = list(fw.keys())[0]
+    # if the single key contains "themes(" or "quotes("… it's our schema note,
+    # so discard and replace with empty object to avoid KeyError
+    if "themes(" in only_key or "quotes(" in only_key or "relationship_moment" in only_key:
+        fw = {}
+elif not isinstance(fw, dict):
+    # if it's a string containing JSON, try to parse;
+    # otherwise, ignore it safely
+    try:
+        maybe = json.loads(str(fw))
+        fw = maybe if isinstance(maybe, dict) else {}
+    except Exception:
+        fw = {}
                 if isinstance(fw, dict):
                     out["from_words"] = {
                         "themes": [str(x) for x in (fw.get("themes") or [])][:3],
