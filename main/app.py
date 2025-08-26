@@ -1,8 +1,8 @@
-# app.py — Life Minus Work (stable AI + stable PDF on fpdf 1.7.2)
+# app.py — Life Minus Work (stable form + stable AI + stable PDF on fpdf 1.7.2)
 # ----------------------------------------------------------------
 import os, sys, re, json, unicodedata, datetime
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Optional, Any
 
 import streamlit as st
 from PIL import Image
@@ -140,7 +140,6 @@ def to_bytes(x: Any) -> bytes:
 
 # ---------- simple Helvetica font setter (fpdf 1.7.2 core fonts) ----------
 def setf(pdf: FPDF, style: str = "", size: int = 12):
-    # Stick to core fonts for reliability on fpdf 1.7.2
     pdf.set_font("Helvetica", style or "", size)
 
 # ---------- Logo ----------
@@ -257,8 +256,7 @@ def ai_sections_and_weights(scores, top3, free_responses, first_name, horizon_we
 
         score_lines = ", ".join([f"{k}: {v}" for k, v in scores.items()])
 
-        # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-        # STRICT JSON PROMPT (no stray .format(), explicit schema)
+        # STRICT JSON PROMPT (explicit schema, no stray .format())
         prompt = f"""
 You are a warm, practical life coach. Return STRICT JSON ONLY matching this schema:
 
@@ -306,7 +304,6 @@ Free-text answers (array of objects with id, q, a): {json.dumps(packed, ensure_a
 IMPORTANT: Only use these IDs as keys inside "weights": {json.dumps(allowed_ids, ensure_ascii=False)}
 Tone: empathetic, encouraging, plain language. No medical claims.
 """
-        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
         system = "Reply with helpful coaching guidance as STRICT JSON only."
         tries = [MAX_TOK_HIGH, FALLBACK_CAP, 6000, 4000, 2500, 1200]
@@ -674,39 +671,81 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
 st.title(APP_TITLE)
 st.write("Answer 15 questions, add your own reflections, and instantly download a personalized PDF summary.")
 
-# First name
+# First name (stable)
 if "first_name" not in st.session_state:
     st.session_state["first_name"] = ""
 first_name = st.text_input("First name", st.session_state["first_name"])
 if first_name:
     st.session_state["first_name"] = first_name.strip()
 
-# Questions
+# Load questions
 questions, _ = load_questions()
-answers: Dict[str, dict] = {}
-free_responses: List[dict] = []
 
+# --- stable answer store ---
+if "answers" not in st.session_state:
+    st.session_state["answers"] = {}  # qid -> {"choice_idx": int|None, "free_text": str}
+
+# Personalization
 with st.expander("Personalization options"):
     horizon_weeks = st.slider("Future snapshot horizon (weeks)", 2, 8, 4)
 
-for q in questions:
-    st.subheader(q["text"])
-    options = [c["label"] for c in q["choices"]] + ["✍️ I'll write my own answer"]
-    selected = st.radio("Choose one:", options, index=None, key=f"{q['id']}_choice")
-    choice_idx = None
-    free_text_val = None
+# === Questionnaire (stable; no mid-way wipes) ===
+with st.form("quiz_form", clear_on_submit=False):
+    pending_answers = {}
 
-    if selected == "✍️ I'll write my own answer":
-        free_text_val = st.text_area("Your answer", key=f"{q['id']}_free", height=80, placeholder="Type your own response...")
-    elif selected is not None:
-        idx = options.index(selected)
-        if idx < len(q["choices"]):
-            choice_idx = idx
+    for q in questions:
+        qid = q["id"]
+        st.subheader(q["text"])
 
-    answers[q["id"]] = {"choice_idx": choice_idx, "free_text": free_text_val}
-    if free_text_val:
-        free_responses.append({"id": q["id"], "question": q["text"], "answer": free_text_val})
-    st.divider()
+        base_options = [c["label"] for c in q["choices"]]
+        write_in_label = "✍️ I'll write my own answer"
+        options = base_options + [write_in_label]
+
+        saved = st.session_state["answers"].get(qid, {})
+        saved_idx = saved.get("choice_idx", None)
+        saved_free = saved.get("free_text", "")
+
+        if isinstance(saved_idx, int) and 0 <= saved_idx < len(base_options):
+            radio_index = saved_idx
+        elif saved_free:
+            radio_index = len(options) - 1
+        else:
+            radio_index = None
+
+        choice_label = st.radio(
+            "Choose one:",
+            options,
+            index=radio_index,
+            key=f"{qid}_choice_radio",
+        )
+
+        use_free = (choice_label == write_in_label)
+        free_val = st.text_area(
+            "Your answer",
+            value=saved_free,
+            key=f"{qid}_free_text",
+            height=80,
+            disabled=not use_free,
+            placeholder="Type your own response…",
+        )
+
+        if use_free:
+            choice_idx = None
+            free_text = free_val.strip()
+        else:
+            try:
+                choice_idx = base_options.index(choice_label)
+            except ValueError:
+                choice_idx = None
+            free_text = ""
+
+        pending_answers[qid] = {"choice_idx": choice_idx, "free_text": free_text}
+        st.divider()
+
+    saved_clicked = st.form_submit_button("Save my answers")
+    if saved_clicked:
+        st.session_state["answers"].update(pending_answers)
+        st.success("Saved! Scroll down to generate your PDF when ready.")
 
 # Email + consent
 st.subheader("Email & Download")
@@ -731,8 +770,18 @@ with st.form("finish_form"):
 if st.session_state.get("request_report"):
     st.session_state["request_report"] = False
 
+    # Use stable answers saved by the form
+    answers = st.session_state.get("answers", {})
     scores = compute_scores(answers, questions)
     top3 = top_themes(scores, 3)
+
+    # Build free_responses from saved store
+    free_responses = []
+    for q in questions:
+        qid = q["id"]
+        a = answers.get(qid, {})
+        if a and a.get("free_text"):
+            free_responses.append({"id": qid, "question": q["text"], "answer": a["free_text"]})
 
     sections = {"weekly_plan": [], "actions": [], "from_words": {}, "weights": {}}
     if USE_AI:
