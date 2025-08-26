@@ -34,9 +34,9 @@ if OPENAI_API_KEY:
     os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
 USE_AI = bool(OPENAI_API_KEY and OpenAI)
-HIGH_MODEL = get_secret("OPENAI_HIGH_MODEL", "gpt-5-mini")  # your last good path
+HIGH_MODEL = get_secret("OPENAI_HIGH_MODEL", "gpt-5-mini")  # last-good model path
 MAX_TOK_HIGH = int(get_secret("MAX_OUTPUT_TOKENS_HIGH", "8000"))
-FALLBACK_CAP = int(get_secret("MAX_OUTPUT_TOKENS_FALLBACK", "6000"))
+FALLBACK_CAP = int(get_secret("MAX_OUTPUT_TOKENS_FALLBACK", "7000"))
 
 # ---------- TEMP diagnostics ----------
 with st.expander("🔧 Diagnostics (temporary)", expanded=False):
@@ -109,7 +109,7 @@ def mc(pdf: "FPDF", text: str, h: float = 6, unicode_ok: bool = False):
     except Exception:
         pass
 
-    # Try 3: reset to core font + safe line
+    # Try 3: core font + safe line
     try:
         pdf.set_font("Helvetica", "", 12)
     except Exception:
@@ -257,7 +257,9 @@ def ai_sections_and_weights(scores, top3, free_responses, first_name, horizon_we
 
         score_lines = ", ".join([f"{k}: {v}" for k, v in scores.items()])
 
-prompt = f"""
+        # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+        # STRICT JSON PROMPT (no stray .format(), explicit schema)
+        prompt = f"""
 You are a warm, practical life coach. Return STRICT JSON ONLY matching this schema:
 
 {{
@@ -297,17 +299,17 @@ You are a warm, practical life coach. Return STRICT JSON ONLY matching this sche
 Return ONLY JSON. NO markdown, no preface.
 
 User first name: {first_name or 'Friend'}.
-Theme scores: {", ".join([f"{k}: {v}" for k,v in scores.items()])}.
+Theme scores: {score_lines}.
 Top 3 themes: {", ".join(top3)}.
 Horizon weeks: {horizon_weeks}.
 Free-text answers (array of objects with id, q, a): {json.dumps(packed, ensure_ascii=False)}
 IMPORTANT: Only use these IDs as keys inside "weights": {json.dumps(allowed_ids, ensure_ascii=False)}
 Tone: empathetic, encouraging, plain language. No medical claims.
 """
-        ).format(h=horizon_weeks)
+        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
         system = "Reply with helpful coaching guidance as STRICT JSON only."
-        tries = [MAX_TOK_HIGH, 6000, 4000, FALLBACK_CAP, 2500, 1200]
+        tries = [MAX_TOK_HIGH, FALLBACK_CAP, 6000, 4000, 2500, 1200]
 
         last_err = None
         for cap in tries:
@@ -329,6 +331,7 @@ Tone: empathetic, encouraging, plain language. No medical claims.
                 if not isinstance(data, dict):
                     raise ValueError("No JSON object found in completion.")
 
+                # Save debug
                 st.session_state["ai_debug"] = {
                     "path": path, "cap_used": cap, "raw_head": raw[:800], "raw_len": len(raw),
                 }
@@ -344,6 +347,7 @@ Tone: empathetic, encouraging, plain language. No medical claims.
                 except Exception:
                     pass
 
+                # Extract sections safely
                 sg = lambda k: str(data.get(k, "") or "")
                 out = {
                     "archetype": sg("archetype"),
@@ -369,31 +373,29 @@ Tone: empathetic, encouraging, plain language. No medical claims.
                     "micro_pledge": sg("micro_pledge"),
                     "weights": {},
                 }
+
+                # Repair & extract from_words
                 fw = data.get("from_words") or {}
-# Repair: sometimes the model wrongly returns one giant key for from_words
-if isinstance(fw, dict) and len(fw) == 1:
-    only_key = list(fw.keys())[0]
-    # if the single key contains "themes(" or "quotes("… it's our schema note,
-    # so discard and replace with empty object to avoid KeyError
-    if "themes(" in only_key or "quotes(" in only_key or "relationship_moment" in only_key:
-        fw = {}
-elif not isinstance(fw, dict):
-    # if it's a string containing JSON, try to parse;
-    # otherwise, ignore it safely
-    try:
-        maybe = json.loads(str(fw))
-        fw = maybe if isinstance(maybe, dict) else {}
-    except Exception:
-        fw = {}
-                if isinstance(fw, dict):
-                    out["from_words"] = {
-                        "themes": [str(x) for x in (fw.get("themes") or [])][:3],
-                        "quotes": [str(x) for x in (fw.get("quotes") or [])][:3],
-                        "insight": str(fw.get("insight", "")),
-                        "ritual": str(fw.get("ritual", "")),
-                        "relationship_moment": str(fw.get("relationship_moment", "")),
-                        "stress_reset": str(fw.get("stress_reset", "")),
-                    }
+                if isinstance(fw, dict) and len(fw) == 1:
+                    only_key = list(fw.keys())[0]
+                    if ("themes(" in only_key) or ("quotes(" in only_key) or ("relationship_moment" in only_key):
+                        fw = {}
+                elif not isinstance(fw, dict):
+                    try:
+                        maybe = json.loads(str(fw))
+                        fw = maybe if isinstance(maybe, dict) else {}
+                    except Exception:
+                        fw = {}
+                out["from_words"] = {
+                    "themes": [str(x) for x in (fw.get("themes") or [])][:3],
+                    "quotes": [str(x) for x in (fw.get("quotes") or [])][:3],
+                    "insight": str(fw.get("insight", "")),
+                    "ritual": str(fw.get("ritual", "")),
+                    "relationship_moment": str(fw.get("relationship_moment", "")),
+                    "stress_reset": str(fw.get("stress_reset", "")),
+                }
+
+                # weights
                 weights = data.get("weights") or {}
                 if isinstance(weights, dict):
                     clean_w = {}
