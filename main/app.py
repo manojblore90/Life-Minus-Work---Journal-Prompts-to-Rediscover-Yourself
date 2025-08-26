@@ -37,7 +37,7 @@ if OPENAI_API_KEY:
     os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
 USE_AI = bool(OPENAI_API_KEY and OpenAI)
-HIGH_MODEL = get_secret("OPENAI_HIGH_MODEL", "gpt-4o-mini")  # Stable model
+HIGH_MODEL = get_secret("OPENAI_HIGH_MODEL", "gpt-4o-mini")
 MAX_TOK_HIGH = int(get_secret("MAX_OUTPUT_TOKENS_HIGH", "8000"))
 FALLBACK_CAP = int(get_secret("MAX_OUTPUT_TOKENS_FALLBACK", "6000"))
 
@@ -81,7 +81,7 @@ def _ascii_only(s: str) -> str:
              .replace("–", "-").replace("—", "-")
              .replace("…", "...").replace("•", "*"))
 
-def clean_text(s: str, max_len: int = 50, ascii_fallback: bool = False) -> str:
+def clean_text(s: str, max_len: int = 40, ascii_fallback: bool = False) -> str:
     """Bulletproof text cleaner for PDF output."""
     if not s:
         return ""
@@ -90,12 +90,14 @@ def clean_text(s: str, max_len: int = 50, ascii_fallback: bool = False) -> str:
     s = unicodedata.normalize("NFKC", s)
     # Remove control chars except newline
     s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", s)
+    # Remove problematic characters (e.g., zero-width spaces, emojis)
+    s = re.sub(r"[\u200B-\u200F\uFEFF\U0001F000-\U0001FFFF]", "", s)
     # Split on any whitespace, preserving it
     pieces, out = re.split(r"(\s+)", s), []
     for t in pieces:
         if t.strip():  # Non-whitespace
             while len(t) > max_len:
-                out.append(t[:max_len] + "...")
+                out.append(t[:max_len] + "-")
                 t = t[max_len:]
             out.append(t)
         else:
@@ -103,6 +105,9 @@ def clean_text(s: str, max_len: int = 50, ascii_fallback: bool = False) -> str:
     s = "".join(out)
     if ascii_fallback:
         s = _ascii_only(s)
+    # Debug problematic text
+    if any(len(t) > max_len for t in s.split()):
+        st.warning(f"Text cleaning issue: found word longer than {max_len} chars after cleaning: {s[:100]}...")
     return s
 
 def mc(pdf: "FPDF", text: str, h: float = 6, unicode_ok: bool = True):
@@ -112,15 +117,17 @@ def mc(pdf: "FPDF", text: str, h: float = 6, unicode_ok: bool = True):
     - If not unicode_ok (Helvetica), convert to ASCII-safe punctuation
     - Never crashes; absolute fallback prints an ASCII notice
     """
-    s = clean_text(text or "", ascii_fallback=not unicode_ok)
+    s = clean_text(text or "", max_len=40, ascii_fallback=not unicode_ok)
     try:
         pdf.multi_cell(0, h, s)
-    except Exception:
+    except Exception as e:
+        st.warning(f"PDF rendering failed for text: {s[:50]}... Error: {str(e)}")
         try:
             for line in s.split("\n"):
-                pdf.multi_cell(0, h, clean_text(line, ascii_fallback=not unicode_ok))
+                pdf.multi_cell(0, h, clean_text(line, max_len=40, ascii_fallback=not unicode_ok))
         except Exception:
-            pdf.multi_cell(0, h, "[...content truncated...]")  # ASCII-only
+            pdf.multi_cell(0, h, "[...content truncated...]")
+            st.warning("Fallback to truncated text used.")
 
 # ----------------------------------------------------------------------------------
 # UNICODE PDF (TTF) LOADER
@@ -137,8 +144,8 @@ def create_pdf_with_unicode() -> Tuple[FPDF, bool]:
     else fall back to Helvetica and return (pdf, False).
     """
     pdf = FPDF(orientation="P", unit="mm", format="A4")
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.set_margins(left=15, top=15, right=15)  # Increased margins
+    pdf.set_auto_page_break(auto=True, margin=20)
+    pdf.set_margins(left=20, top=20, right=20)  # Wider margins
 
     here = Path(__file__).parent
     candidates_regular = [
@@ -172,16 +179,14 @@ def create_pdf_with_unicode() -> Tuple[FPDF, bool]:
                     pdf.add_font("LMW", "I", i, uni=True)
                 except Exception:
                     pass
-            pdf.set_font("LMW", "", 12)
+            pdf.set_font("LMW", "", 11)  # Slightly smaller font
             return pdf, True
-        except Exception:
-            pass
-
-    # Fallback (Latin‑1 only)
-    pdf.set_font("Helvetica", "", 12)
+        except Exception as e:
+            st.warning(f"Font loading failed: {str(e)}. Using Helvetica.")
+    pdf.set_font("Helvetica", "", 11)
     return pdf, False
 
-def setf(pdf: FPDF, unicode_ok: bool, style: str = "", size: int = 12):
+def setf(pdf: FPDF, unicode_ok: bool, style: str = "", size: int = 11):
     """Smart set_font across Unicode/Helvetica paths."""
     if unicode_ok:
         try:
@@ -332,13 +337,13 @@ def ai_sections_and_weights(
             "top_theme_boosters": [str, ...],
             "pitfalls": [str, ...]
         }
-        Ensure all strings are concise (max 200 chars per string), safe for PDF rendering, and avoid special characters that might break PDF generation. Avoid long continuous words.
+        Ensure all strings are concise (max 100 chars per string), safe for PDF rendering, and avoid special characters or long continuous words (max 40 chars per word).
         """
         user_prompt = json.dumps({
             "scores": scores,
             "top3": top3,
-            "free_responses": [{k: clean_text(v, max_len=50) if k == "answer" else v for k, v in fr.items()} for fr in free_responses],
-            "first_name": clean_text(first_name, max_len=50),
+            "free_responses": [{k: clean_text(v, max_len=40) if k == "answer" else v for k, v in fr.items()} for fr in free_responses],
+            "first_name": clean_text(first_name, max_len=40),
             "horizon_weeks": horizon_weeks
         })
         content, usage, path = _call_openai_json(HIGH_MODEL, system_prompt, user_prompt, FALLBACK_CAP)
@@ -348,10 +353,10 @@ def ai_sections_and_weights(
                 # Clean AI-generated strings
                 for key in ["summary", "deep_insight", "future_snapshot", "affirmation", "quote"]:
                     if key in result:
-                        result[key] = clean_text(result[key], max_len=50)
+                        result[key] = clean_text(result[key], max_len=40)
                 for key in ["actions", "weekly_plan", "top_theme_boosters", "pitfalls"]:
                     if key in result:
-                        result[key] = [clean_text(item, max_len=50) for item in result[key]]
+                        result[key] = [clean_text(item, max_len=40) for item in result[key]]
                 return result
             except json.JSONDecodeError:
                 st.warning("AI returned invalid JSON. Using default template.")
@@ -379,123 +384,123 @@ def make_pdf_bytes(
         # Logo if available
         if logo_path:
             try:
-                pdf.image(logo_path, x=15, y=15, w=30)
+                pdf.image(logo_path, x=20, y=20, w=30)
             except Exception:
-                pass
+                st.warning("Failed to load logo image.")
         # Title
-        setf(pdf, unicode_ok, "B", 18)
-        mc(pdf, clean_text(REPORT_TITLE, max_len=50), 8, unicode_ok)
+        setf(pdf, unicode_ok, "B", 16)
+        mc(pdf, clean_text(REPORT_TITLE, max_len=40), 8, unicode_ok)
         setf(pdf, unicode_ok, "I", 10)
         ts = datetime.datetime.now().strftime("%B %d, %Y")
-        mc(pdf, f"Generated for {clean_text(first_name or 'you', max_len=50)} on {ts}", unicode_ok)
+        mc(pdf, f"Generated for {clean_text(first_name or 'you', max_len=40)} on {ts}", unicode_ok)
         pdf.ln(3)
-        setf(pdf, unicode_ok, "", 12)
+        setf(pdf, unicode_ok, "", 11)
 
         # Greet
-        greet = f"Hi {clean_text(first_name, max_len=50)}," if first_name else "Hi,"
+        greet = f"Hi {clean_text(first_name, max_len=40)}," if first_name else "Hi,"
         mc(pdf, greet, unicode_ok)
         pdf.ln(2)
 
         # Summary
         if sections.get("summary"):
-            mc(pdf, clean_text(sections["summary"], max_len=50), unicode_ok)
+            mc(pdf, clean_text(sections["summary"], max_len=40), unicode_ok)
             pdf.ln(2)
 
         # Themes
-        setf(pdf, unicode_ok, "B", 14); mc(pdf, "Your Top Themes", unicode_ok)
-        setf(pdf, unicode_ok, "", 12)
+        setf(pdf, unicode_ok, "B", 13); mc(pdf, "Your Top Themes", unicode_ok)
+        setf(pdf, unicode_ok, "", 11)
         for i, theme in enumerate(top3, 1):
-            mc(pdf, f"{i}. {clean_text(theme, max_len=50)}", unicode_ok)
+            mc(pdf, f"{i}. {clean_text(theme, max_len=40)}", unicode_ok)
         pdf.ln(2)
 
         # Deep insight
         if sections.get("deep_insight"):
-            setf(pdf, unicode_ok, "B", 14); mc(pdf, "Deep Insight", unicode_ok)
-            setf(pdf, unicode_ok, "", 12)
-            mc(pdf, clean_text(sections["deep_insight"], max_len=50), unicode_ok)
+            setf(pdf, unicode_ok, "B", 13); mc(pdf, "Deep Insight", unicode_ok)
+            setf(pdf, unicode_ok, "", 11)
+            mc(pdf, clean_text(sections["deep_insight"], max_len=40), unicode_ok)
             pdf.ln(2)
 
         # Future snapshot
         if sections.get("future_snapshot"):
-            setf(pdf, unicode_ok, "B", 14); mc(pdf, f"Your Future Snapshot ({sections.get('horizon_weeks', 4)} weeks from now)", unicode_ok)
-            setf(pdf, unicode_ok, "", 12)
-            mc(pdf, clean_text(sections["future_snapshot"], max_len=50), unicode_ok)
+            setf(pdf, unicode_ok, "B", 13); mc(pdf, f"Your Future Snapshot ({sections.get('horizon_weeks', 4)} weeks from now)", unicode_ok)
+            setf(pdf, unicode_ok, "", 11)
+            mc(pdf, clean_text(sections["future_snapshot"], max_len=40), unicode_ok)
             pdf.ln(2)
 
         # Actions
         if sections.get("actions"):
-            setf(pdf, unicode_ok, "B", 14); mc(pdf, "Tiny Actions to Start Today", unicode_ok)
-            setf(pdf, unicode_ok, "", 12)
+            setf(pdf, unicode_ok, "B", 13); mc(pdf, "Tiny Actions to Start Today", unicode_ok)
+            setf(pdf, unicode_ok, "", 11)
             for a in sections["actions"]:
-                mc(pdf, f"* {clean_text(a, max_len=50)}", unicode_ok)
+                mc(pdf, f"* {clean_text(a, max_len=40)}", unicode_ok)
             pdf.ln(2)
 
         # Weekly plan
         if sections.get("weekly_plan"):
-            setf(pdf, unicode_ok, "B", 14); mc(pdf, "Your Signature Week", unicode_ok)
-            setf(pdf, unicode_ok, "", 12)
+            setf(pdf, unicode_ok, "B", 13); mc(pdf, "Your Signature Week", unicode_ok)
+            setf(pdf, unicode_ok, "", 11)
             for i, step in enumerate(sections["weekly_plan"], 1):
-                mc(pdf, f"Day {i}: {clean_text(step, max_len=50)}", unicode_ok)
+                mc(pdf, f"Day {i}: {clean_text(step, max_len=40)}", unicode_ok)
             pdf.ln(2)
 
         # Balancing Opportunity
         lows = [name for name, _ in sorted(scores.items(), key=lambda x: x[1])[:2]]
         if lows:
-            setf(pdf, unicode_ok, "B", 14); mc(pdf, "Balancing Opportunity", unicode_ok)
-            setf(pdf, unicode_ok, "", 12)
+            setf(pdf, unicode_ok, "B", 13); mc(pdf, "Balancing Opportunity", unicode_ok)
+            setf(pdf, unicode_ok, "", 11)
             for theme in lows:
                 tip = balancing_suggestion(theme)
-                mc(pdf, f"{theme}: {clean_text(tip, max_len=50)}", unicode_ok)
+                mc(pdf, f"{theme}: {clean_text(tip, max_len=40)}", unicode_ok)
             pdf.ln(2)
 
         # Boosters / pitfalls
         if sections.get("top_theme_boosters") or sections.get("pitfalls"):
-            setf(pdf, unicode_ok, "B", 14); mc(pdf, "Amplify what works / Avoid what trips you", unicode_ok)
+            setf(pdf, unicode_ok, "B", 13); mc(pdf, "Amplify what works / Avoid what trips you", unicode_ok)
             if sections.get("top_theme_boosters"):
-                setf(pdf, unicode_ok, "B", 12); mc(pdf, "Boosters", unicode_ok)
-                setf(pdf, unicode_ok, "", 12)
+                setf(pdf, unicode_ok, "B", 11); mc(pdf, "Boosters", unicode_ok)
+                setf(pdf, unicode_ok, "", 11)
                 for b in sections.get("top_theme_boosters", []):
-                    mc(pdf, f"* {clean_text(b, max_len=50)}", unicode_ok)
+                    mc(pdf, f"* {clean_text(b, max_len=40)}", unicode_ok)
             if sections.get("pitfalls"):
-                setf(pdf, unicode_ok, "B", 12); mc(pdf, "Pitfalls", unicode_ok)
-                setf(pdf, unicode_ok, "", 12)
+                setf(pdf, unicode_ok, "B", 11); mc(pdf, "Pitfalls", unicode_ok)
+                setf(pdf, unicode_ok, "", 11)
                 for p in sections.get("pitfalls", []):
-                    mc(pdf, f"- {clean_text(p, max_len=50)}", unicode_ok)
+                    mc(pdf, f"- {clean_text(p, max_len=40)}", unicode_ok)
             pdf.ln(2)
 
         # Affirmation / quote
         if sections.get("affirmation") or sections.get("quote"):
-            setf(pdf, unicode_ok, "B", 12); mc(pdf, "Keep this in view", unicode_ok)
-            setf(pdf, unicode_ok, "I", 11)
+            setf(pdf, unicode_ok, "B", 11); mc(pdf, "Keep this in view", unicode_ok)
+            setf(pdf, unicode_ok, "I", 10)
             if sections.get("affirmation"):
-                mc(pdf, f"Affirmation: {clean_text(sections['affirmation'], max_len=50)}", unicode_ok)
+                mc(pdf, f"Affirmation: {clean_text(sections['affirmation'], max_len=40)}", unicode_ok)
             if sections.get("quote"):
-                qtext = f"\"{clean_text(sections['quote'], max_len=50)}\""
+                qtext = f"\"{clean_text(sections['quote'], max_len=40)}\""
                 mc(pdf, qtext, unicode_ok)
             pdf.ln(2)
-            setf(pdf, unicode_ok, "", 12)
+            setf(pdf, unicode_ok, "", 11)
 
         # Your words we heard
         if free_responses:
-            setf(pdf, unicode_ok, "B", 14); mc(pdf, "Your words we heard", unicode_ok)
-            setf(pdf, unicode_ok, "", 12)
+            setf(pdf, unicode_ok, "B", 13); mc(pdf, "Your words we heard", unicode_ok)
+            setf(pdf, unicode_ok, "", 11)
             for fr in free_responses:
                 if not fr.get("answer"):
                     continue
-                mc(pdf, f"* {clean_text(fr.get('question',''), max_len=50)}", unicode_ok)
-                mc(pdf, f"  {clean_text(fr.get('answer',''), max_len=50)}", unicode_ok)
+                mc(pdf, f"* {clean_text(fr.get('question',''), max_len=40)}", unicode_ok)
+                mc(pdf, f"  {clean_text(fr.get('answer',''), max_len=40)}", unicode_ok)
                 pdf.ln(2)
 
         # Page hint before checklist
         pdf.ln(3)
-        setf(pdf, unicode_ok, "B", 12)
+        setf(pdf, unicode_ok, "B", 11)
         mc(pdf, "On the next page: a printable 'Signature Week — At a glance' checklist you can use right away.", unicode_ok)
 
         # Checklist page
         pdf.add_page()
-        setf(pdf, unicode_ok, "B", 16)
+        setf(pdf, unicode_ok, "B", 15)
         mc(pdf, "Signature Week — At a glance", unicode_ok)
-        setf(pdf, unicode_ok, "", 12)
+        setf(pdf, unicode_ok, "", 11)
         mc(pdf, "A simple plan you can print or screenshot. Check items off as you go.", unicode_ok)
         pdf.ln(2)
 
@@ -507,27 +512,27 @@ def make_pdf_bytes(
             y = pdf.get_y()
             pdf.rect(x, y + 1.5, 4, 4)
             pdf.set_x(x + 6)
-            mc(pdf, f"Day {i+1}: {clean_text(item, max_len=50)}", unicode_ok)
+            mc(pdf, f"Day {i+1}: {clean_text(item, max_len=40)}", unicode_ok)
 
         pdf.ln(2)
-        setf(pdf, unicode_ok, "B", 14); mc(pdf, "Tiny Progress Tracker", unicode_ok)
-        setf(pdf, unicode_ok, "", 12)
+        setf(pdf, unicode_ok, "B", 13); mc(pdf, "Tiny Progress Tracker", unicode_ok)
+        setf(pdf, unicode_ok, "", 11)
         milestones = sections.get("actions") or [
             "Choose one tiny step and schedule it.",
-            "Tell a friend your plan for gentle accountability.",
-            "Spend 20 minutes on your step and celebrate completion."
+            "Tell a friend your plan for accountability.",
+            "Spend 20 min on your step and celebrate."
         ]
         for m in milestones[:3]:
             x = pdf.get_x()
             y = pdf.get_y()
             pdf.rect(x, y + 1.5, 4, 4)
             pdf.set_x(x + 6)
-            mc(pdf, clean_text(m, max_len=50), unicode_ok)
+            mc(pdf, clean_text(m, max_len=40), unicode_ok)
         pdf.ln(2)
 
-        setf(pdf, unicode_ok, "I", 10); pdf.ln(2)
-        mc(pdf, "Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice.", unicode_ok)
-        setf(pdf, unicode_ok, "", 12)
+        setf(pdf, unicode_ok, "I", 9); pdf.ln(2)
+        mc(pdf, "Life Minus Work • This report is a starting point for reflection. Not medical or financial advice.", unicode_ok)
+        setf(pdf, unicode_ok, "", 11)
 
         # Output
         raw = pdf.output(dest="S")
@@ -536,8 +541,8 @@ def make_pdf_bytes(
         st.error(f"PDF generation failed: {str(e)}. Please try shorter inputs or fewer special characters.")
         pdf = FPDF()
         pdf.add_page()
-        pdf.set_font("Helvetica", "", 12)
-        pdf.set_margins(left=15, top=15, right=15)
+        pdf.set_font("Helvetica", "", 11)
+        pdf.set_margins(left=20, top=20, right=20)
         pdf.multi_cell(0, 10, "Error generating report. Please try again with shorter text or fewer special characters.")
         return pdf.output(dest="S")  # Always return bytes
 
@@ -550,9 +555,9 @@ st.write("Answer 15 questions, add your own reflections, and instantly download 
 # First name
 if "first_name" not in st.session_state:
     st.session_state["first_name"] = ""
-first_name = st.text_input("First name", st.session_state["first_name"], max_chars=50)
+first_name = st.text_input("First name", st.session_state["first_name"], max_chars=40)
 if first_name:
-    st.session_state["first_name"] = clean_text(first_name.strip(), max_len=50)
+    st.session_state["first_name"] = clean_text(first_name.strip(), max_len=40)
 
 # Load questions
 questions, _ = load_questions()
@@ -572,9 +577,9 @@ for q in questions:
     free_text_val = None
 
     if selected == "✍️ I'll write my own answer":
-        free_text_val = st.text_area("Your answer", key=f"{q['id']}_free", height=80, placeholder="Type your own response...", max_chars=1000)
+        free_text_val = st.text_area("Your answer", key=f"{q['id']}_free", height=80, placeholder="Type your own response...", max_chars=800)
         if free_text_val:
-            free_text_val = clean_text(free_text_val, max_len=50)
+            free_text_val = clean_text(free_text_val, max_len=40)
     elif selected is not None:
         idx = options.index(selected)
         if idx < len(q["choices"]):
@@ -588,7 +593,7 @@ for q in questions:
 # Email + consent form
 st.subheader("Email & Download")
 with st.form("finish_form"):
-    email_val = st.text_input("Your email (for your download link)", key="email_input", placeholder="you@example.com")
+    email_val = st.text_input("Your email (for your download link)", key="email_input", placeholder="you@example.com", max_chars=100)
     consent_val = st.checkbox(
         "I agree to receive my results and occasional updates from Life Minus Work.",
         key="consent_input",
@@ -599,7 +604,7 @@ with st.form("finish_form"):
         if not email_val or not consent_val:
             st.error("Please enter your email and give consent to continue.")
         else:
-            st.session_state["email"] = email_val.strip()
+            st.session_state["email"] = clean_text(email_val.strip(), max_len=40)
             st.session_state["consent"] = True
             st.session_state["request_report"] = True
             st.toast("Generating your report…", icon="⏳")
@@ -623,7 +628,7 @@ if st.session_state.get("request_report"):
         )
         dbg = st.session_state.get("ai_debug") or {}
         tok = st.session_state.get("token_usage") or {}
-        with st.expander("AI generation details (debug)", expanded=False):
+        with st.expander("AI generation details (debug)", expanded=True):
             if dbg:
                 for k, v in dbg.items():
                     if k == "raw_head" and isinstance(v, str):
@@ -638,7 +643,7 @@ if st.session_state.get("request_report"):
                     file_name="last_ai.json",
                     mime="application/json",
                 )
-        with st.expander("Token usage (one run)", expanded=False):
+        with st.expander("Token usage (one run)", expanded=True):
             if tok:
                 st.write(
                     f"Model: {tok.get('model','?')} | path: {tok.get('path','?')} | cap_used: {tok.get('cap_used','?')}"
@@ -662,11 +667,11 @@ if st.session_state.get("request_report"):
     if not sections.get("deep_insight"):
         top1 = top3[0] if top3 else "what energizes you"
         sections.update({
-            "deep_insight": f"Thank you for completing the Reflection Quiz, {clean_text(st.session_state.get('first_name','Friend'), max_len=50)}.",
+            "deep_insight": f"Thank you for completing the Reflection Quiz, {clean_text(st.session_state.get('first_name','Friend'), max_len=40)}.",
             "actions": [
                 "Choose one tiny step you can take this week.",
-                "Tell a friend your plan—gentle accountability.",
-                "Schedule 20 minutes for reflection or journaling.",
+                "Tell a friend your plan for accountability.",
+                "Schedule 20 minutes for reflection.",
             ],
             "weekly_plan": [
                 "Name your intention.",
@@ -675,12 +680,11 @@ if st.session_state.get("request_report"):
                 "Take a calm walk or mindful pause.",
                 "Do one small adventurous thing.",
                 "Offer help or encouragement to someone.",
-                "Review your week and set the next tiny step.",
+                "Review your week and set the next step.",
             ],
             "future_snapshot": (
                 f"It is {horizon_weeks} weeks later. You have stayed close to what matters, "
-                f"protecting time for {top1}. A few tiny actions, repeated, build confidence. "
-                "You pause, adjust, and keep going."
+                f"protecting time for {top1}. A few tiny actions build confidence."
             ),
             "horizon_weeks": horizon_weeks,
             "weights": {},
@@ -732,8 +736,8 @@ if st.session_state.get("request_report"):
                 writer.writerow(["timestamp", "first_name", "email", "scores", "top3"])
             writer.writerow([
                 ts,
-                clean_text(st.session_state.get("first_name", ""), max_len=50),
-                st.session_state.get("email", ""),
+                clean_text(st.session_state.get("first_name", ""), max_len=40),
+                clean_text(st.session_state.get("email", ""), max_len=40),
                 json.dumps(scores),
                 json.dumps(top3),
             ])
@@ -742,7 +746,7 @@ if st.session_state.get("request_report"):
         st.caption(f"Could not save responses (demo only). {e}")
 
 # Convenience “Test OpenAI” control (optional)
-with st.expander("AI status (debug)", expanded=False):
+with st.expander("AI status (debug)", expanded=True):
     st.write("AI enabled:", USE_AI)
     st.write("Model:", HIGH_MODEL)
     st.write("Max tokens:", MAX_TOK_HIGH, "(fallback", FALLBACK_CAP, ")")
