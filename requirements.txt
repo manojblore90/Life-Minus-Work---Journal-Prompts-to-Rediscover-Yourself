@@ -3,7 +3,7 @@
 streamlit==1.36.0
 
 # PDF generation
-fpdf2>=2.7.8
+fpdf==1.7.2
 
 # Image support (also handles .webp -> .png conversion)
 Pillow>=10.3.0
