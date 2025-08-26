@@ -1,5 +1,5 @@
-# app.py — Life Minus Work (roll-back with AI working + PDF hardening)
-# -------------------------------------------------------------------
+# app.py — Life Minus Work (stable AI + stable PDF on fpdf 1.7.2)
+# ----------------------------------------------------------------
 import os, sys, re, json, unicodedata, datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
@@ -8,15 +8,13 @@ import streamlit as st
 from PIL import Image
 from fpdf import FPDF
 
-# OpenAI SDK
+# ---------- OpenAI ----------
 try:
     from openai import OpenAI
 except Exception:
     OpenAI = None
 
-# -----------------------------
-# CONFIG & PAGE
-# -----------------------------
+# ---------- App config ----------
 APP_TITLE    = "Life Minus Work — Reflection Quiz (15 questions)"
 REPORT_TITLE = "Your Reflection Report"
 THEMES       = ["Identity", "Growth", "Connection", "Peace", "Adventure", "Contribution"]
@@ -36,14 +34,11 @@ if OPENAI_API_KEY:
     os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
 USE_AI = bool(OPENAI_API_KEY and OpenAI)
-# Keep the same model path you were using when AI worked well:
-HIGH_MODEL = get_secret("OPENAI_HIGH_MODEL", "gpt-5-mini")
+HIGH_MODEL = get_secret("OPENAI_HIGH_MODEL", "gpt-5-mini")  # your last good path
 MAX_TOK_HIGH = int(get_secret("MAX_OUTPUT_TOKENS_HIGH", "8000"))
 FALLBACK_CAP = int(get_secret("MAX_OUTPUT_TOKENS_FALLBACK", "6000"))
 
-# -----------------------------
-# TEMP DIAGNOSTICS
-# -----------------------------
+# ---------- TEMP diagnostics ----------
 with st.expander("🔧 Diagnostics (temporary)", expanded=False):
     st.write("Python:", sys.version.split()[0])
     here = Path(__file__).parent
@@ -53,18 +48,11 @@ with st.expander("🔧 Diagnostics (temporary)", expanded=False):
         st.write("Files near app.py:", [p.name for p in here.iterdir()])
     except Exception as e:
         st.write("Dir list failed:", e)
-    try:
-        import fpdf as _fp
-        st.write("fpdf2 version:", getattr(_fp, "__version__", "unknown"))
-    except Exception:
-        pass
     masked = (OPENAI_API_KEY[:4] + "…" + OPENAI_API_KEY[-4:]) if OPENAI_API_KEY else "None"
     st.write("OPENAI_API_KEY present:", bool(OPENAI_API_KEY), "| key:", masked if OPENAI_API_KEY else "—")
     st.write("Model:", HIGH_MODEL, "| MAX_TOK_HIGH:", MAX_TOK_HIGH, "| FALLBACK_CAP:", FALLBACK_CAP)
 
-# -----------------------------
-# TEXT CLEANING
-# -----------------------------
+# ---------- Text cleaning / fallbacks ----------
 def _ascii_only(s: str) -> str:
     return (s.replace("’", "'").replace("‘", "'")
              .replace("“", '"').replace("”", '"')
@@ -77,26 +65,24 @@ def clean_text(s: str, max_len: int = 1000, ascii_fallback: bool = False) -> str
     if not isinstance(s, str):
         s = str(s)
     s = unicodedata.normalize("NFKC", s)
-    s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", s)
-    # Guard against ultra-long tokens
-    parts = []
+    s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", s)  # strip control chars
+    # guard against super-long tokens that can break line breaking
+    tokens = []
     for t in s.split():
-        parts.append(t if len(t) <= max_len else t[:max_len] + "...")
-    s = " ".join(parts)
+        tokens.append(t if len(t) <= max_len else t[:max_len] + "...")
+    s = " ".join(tokens)
     if ascii_fallback:
         s = _ascii_only(s)
     return s
 
-# -----------------------------
-# WIDTH-SAFE MultiCell (fixes crash)
-# -----------------------------
-def mc(pdf: "FPDF", text: str, h: float = 6, unicode_ok: bool = True):
+# ---------- width-safe MultiCell (prevents fpdf line_break crash) ----------
+def mc(pdf: "FPDF", text: str, h: float = 6, unicode_ok: bool = False):
     """
-    Crash-proof MultiCell:
-      - explicit width (no width=0)
-      - normalizes text
+    Crash-proof MultiCell for fpdf 1.7.2:
+      - explicit width (avoid width=0)
+      - normalize text
       - retries with ASCII
-      - final fallback prints safe notice (never throws)
+      - final fallback prints a safe line
     """
     try:
         w = float(pdf.w) - float(pdf.l_margin) - float(pdf.r_margin)
@@ -108,14 +94,14 @@ def mc(pdf: "FPDF", text: str, h: float = 6, unicode_ok: bool = True):
     s = clean_text((text or "").replace("\r\n", "\n").replace("\r", "\n"),
                    ascii_fallback=not unicode_ok)
 
-    # Try 1: full text
+    # Try 1: as-is (likely ASCII already)
     try:
         pdf.multi_cell(w, h, s)
         return
     except Exception:
         pass
 
-    # Try 2: ASCII fallback
+    # Try 2: forced ASCII
     try:
         s2 = clean_text(s, ascii_fallback=True)
         pdf.multi_cell(w, h, s2)
@@ -133,9 +119,7 @@ def mc(pdf: "FPDF", text: str, h: float = 6, unicode_ok: bool = True):
     except Exception:
         return
 
-# -----------------------------
-# BYTES SAFETY
-# -----------------------------
+# ---------- bytes safety for Streamlit download ----------
 def to_bytes(x: Any) -> bytes:
     if x is None:
         return b""
@@ -154,77 +138,12 @@ def to_bytes(x: Any) -> bytes:
     except Exception:
         return bytes(str(x), "utf-8", "ignore")
 
-# -----------------------------
-# UNICODE PDF SUPPORT
-# -----------------------------
-def _first_existing(paths):
-    for p in paths:
-        if Path(p).exists():
-            return str(p)
-    return None
+# ---------- simple Helvetica font setter (fpdf 1.7.2 core fonts) ----------
+def setf(pdf: FPDF, style: str = "", size: int = 12):
+    # Stick to core fonts for reliability on fpdf 1.7.2
+    pdf.set_font("Helvetica", style or "", size)
 
-def create_pdf_with_unicode() -> Tuple[FPDF, bool]:
-    pdf = FPDF(orientation="P", unit="mm", format="A4")
-    pdf.set_auto_page_break(auto=True, margin=15)
-
-    here = Path(__file__).parent
-    candidates_regular = [
-        here / "DejaVuSans.ttf",
-        here / "assets" / "DejaVuSans.ttf",
-        here / "assets" / "fonts" / "DejaVuSans.ttf",
-        here / "NotoSans-Regular.ttf",
-        here / "assets" / "NotoSans-Regular.ttf",
-        here / "assets" / "fonts" / "NotoSans-Regular.ttf",
-    ]
-    candidates_bold = [
-        here / "DejaVuSans-Bold.ttf",
-        here / "assets" / "DejaVuSans-Bold.ttf",
-        here / "assets" / "fonts" / "DejaVuSans-Bold.ttf",
-        here / "NotoSans-Bold.ttf",
-        here / "assets" / "NotoSans-Bold.ttf",
-        here / "assets" / "fonts" / "NotoSans-Bold.ttf",
-    ]
-    candidates_italic = [
-        here / "DejaVuSans-Oblique.ttf",
-        here / "assets" / "DejaVuSans-Oblique.ttf",
-        here / "assets" / "fonts" / "DejaVuSans-Oblique.ttf",
-        here / "NotoSans-Italic.ttf",
-        here / "assets" / "NotoSans-Italic.ttf",
-        here / "assets" / "fonts" / "NotoSans-Italic.ttf",
-    ]
-    reg = _first_existing(candidates_regular)
-    if reg:
-        try:
-            pdf.add_font("LMW", "", reg, uni=True)
-            b = _first_existing(candidates_bold)
-            if b:
-                try: pdf.add_font("LMW", "B", b, uni=True)
-                except Exception: pass
-            i = _first_existing(candidates_italic)
-            if i:
-                try: pdf.add_font("LMW", "I", i, uni=True)
-                except Exception: pass
-            pdf.set_font("LMW", "", 12)
-            return pdf, True
-        except Exception:
-            pass
-
-    # Fallback Latin-1 (still safe with ASCII)
-    pdf.set_font("Helvetica", "", 12)
-    return pdf, False
-
-def setf(pdf: FPDF, unicode_ok: bool, style: str = "", size: int = 12):
-    if unicode_ok:
-        try:
-            pdf.set_font("LMW", style or "", size)
-        except Exception:
-            pdf.set_font("LMW", "", size)
-    else:
-        pdf.set_font("Helvetica", style or "", size)
-
-# -----------------------------
-# LOGO
-# -----------------------------
+# ---------- Logo ----------
 def get_logo_png_path() -> Optional[str]:
     here = Path(__file__).parent
     candidates = [
@@ -249,9 +168,7 @@ def get_logo_png_path() -> Optional[str]:
                     return None
     return None
 
-# -----------------------------
-# QUESTIONS
-# -----------------------------
+# ---------- Load questions ----------
 def load_questions(filename="questions.json"):
     base_dir = Path(__file__).parent
     path = base_dir / filename
@@ -268,9 +185,7 @@ def load_questions(filename="questions.json"):
         data = json.load(f)
     return data["questions"], data.get("themes", [])
 
-# -----------------------------
-# SCORING
-# -----------------------------
+# ---------- Scoring ----------
 def compute_scores(answers: dict, questions: list) -> Dict[str, int]:
     scores = {t: 0 for t in THEMES}
     for q in questions:
@@ -300,9 +215,7 @@ def balancing_suggestion(theme: str) -> str:
     }
     return suggestions.get(theme, "Take one small, visible step this week.")
 
-# -----------------------------
-# OPENAI (JSON mode + token tracker)
-# -----------------------------
+# ---------- OpenAI (strict JSON + token tracker) ----------
 def _call_openai_json(model: str, system: str, user: str, cap: int):
     if not (USE_AI and OpenAI):
         raise RuntimeError("OpenAI not configured")
@@ -311,8 +224,8 @@ def _call_openai_json(model: str, system: str, user: str, cap: int):
     r = client.chat.completions.create(
         model=model,
         messages=messages,
-        max_completion_tokens=cap,               # IMPORTANT for latest SDK/models
-        response_format={"type": "json_object"}, # Strict JSON
+        max_completion_tokens=cap,               # IMPORTANT with new SDK/models
+        response_format={"type": "json_object"}, # strict JSON
     )
     content = r.choices[0].message.content if r.choices else ""
     usage = getattr(r, "usage", None)
@@ -469,13 +382,11 @@ def ai_sections_and_weights(scores, top3, free_responses, first_name, horizon_we
         st.session_state["ai_debug"] = {"fatal": f"{type(e).__name__}: {e}"}
         return None
 
-# -----------------------------
-# PDF HELPERS
-# -----------------------------
-def draw_scores_barchart(pdf: FPDF, unicode_ok: bool, scores: Dict[str, int]):
-    setf(pdf, unicode_ok, "B", 14)
-    mc(pdf, "Your Theme Snapshot", unicode_ok=unicode_ok)
-    setf(pdf, unicode_ok, "", 12)
+# ---------- PDF helpers ----------
+def draw_scores_barchart(pdf: FPDF, scores: Dict[str, int]):
+    setf(pdf, "B", 14)
+    mc(pdf, "Your Theme Snapshot")
+    setf(pdf, "", 12)
     max_score = max(max(scores.values()), 1)
     bar_w_max = 120
     x_left = pdf.get_x() + 10
@@ -492,62 +403,55 @@ def draw_scores_barchart(pdf: FPDF, unicode_ok: bool, scores: Dict[str, int]):
         y += 7
     pdf.set_y(y + 4)
 
-def paragraph(pdf: FPDF, unicode_ok: bool, title: str, body: str):
-    setf(pdf, unicode_ok, "B", 14)
-    mc(pdf, title, unicode_ok=unicode_ok)
-    setf(pdf, unicode_ok, "", 12)
+def paragraph(pdf: FPDF, title: str, body: str):
+    setf(pdf, "B", 14); mc(pdf, title)
+    setf(pdf, "", 12)
     for line in str(body).split("\n"):
-        mc(pdf, line, unicode_ok=unicode_ok)
+        mc(pdf, line)
     pdf.ln(2)
 
-def checkbox_line(pdf: FPDF, unicode_ok: bool, text: str):
+def checkbox_line(pdf: FPDF, text: str):
     x = pdf.get_x(); y = pdf.get_y()
     pdf.rect(x, y + 1.5, 4, 4)
     pdf.set_x(x + 6)
-    mc(pdf, text, unicode_ok=unicode_ok)
+    mc(pdf, text)
 
-def label_value(pdf: FPDF, unicode_ok: bool, label: str, value: str):
-    setf(pdf, unicode_ok, "B", 12); mc(pdf, label, unicode_ok=unicode_ok)
-    setf(pdf, unicode_ok, "", 12);  mc(pdf, value, unicode_ok=unicode_ok)
+def label_value(pdf: FPDF, label: str, value: str):
+    setf(pdf, "B", 12); mc(pdf, label)
+    setf(pdf, "", 12);  mc(pdf, value)
 
-def future_callout(pdf: FPDF, unicode_ok: bool, weeks: int, text: str):
+def future_callout(pdf: FPDF, weeks: int, text: str):
     pdf.set_text_color(30, 60, 120)
-    setf(pdf, unicode_ok, "B", 14)
-    mc(pdf, f"Future Snapshot — {weeks} weeks", unicode_ok=unicode_ok)
+    setf(pdf, "B", 14); mc(pdf, f"Future Snapshot — {weeks} weeks")
     pdf.set_text_color(0, 0, 0)
-    setf(pdf, unicode_ok, "I", 12)
-    mc(pdf, text, unicode_ok=unicode_ok)
-    pdf.ln(2)
-    setf(pdf, unicode_ok, "", 12)
+    setf(pdf, "I", 12); mc(pdf, text); pdf.ln(2)
+    setf(pdf, "", 12)
 
-def left_bar_callout(pdf: FPDF, unicode_ok: bool, title: str, body: str, bullets=None):
+def left_bar_callout(pdf: FPDF, title: str, body: str, bullets=None):
     if bullets is None:
         bullets = []
     x = pdf.get_x(); y = pdf.get_y()
     pdf.set_fill_color(30, 144, 255)
     pdf.rect(x, y, 2, 6, "F")
     pdf.set_x(x + 4)
-    setf(pdf, unicode_ok, "B", 13)
-    mc(pdf, title, unicode_ok=unicode_ok)
+    setf(pdf, "B", 13); mc(pdf, title)
     pdf.set_x(x + 4)
-    setf(pdf, unicode_ok, "", 12)
-    mc(pdf, body, unicode_ok=unicode_ok)
+    setf(pdf, "", 12); mc(pdf, body)
     for b in bullets:
         pdf.set_x(x + 4)
         pdf.cell(4, 6, "*")
-        mc(pdf, b, unicode_ok=unicode_ok)
+        mc(pdf, b)
     pdf.ln(1)
 
-# -----------------------------
-# PDF MAKE
-# -----------------------------
+# ---------- PDF build ----------
 def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: List[str],
                    sections: dict, free_responses: List[dict], logo_path: Optional[str]) -> bytes:
-    pdf, unicode_ok = create_pdf_with_unicode()
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 
-    # IMPORTANT: set a font BEFORE first mc()
-    setf(pdf, unicode_ok, "B", 18)
+    # IMPORTANT: set core font before any text
+    setf(pdf, "B", 18)
 
     # Logo
     if logo_path:
@@ -556,142 +460,140 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         except Exception:
             pass
 
-    mc(pdf, REPORT_TITLE, unicode_ok=unicode_ok)
-    setf(pdf, unicode_ok, "", 12)
+    mc(pdf, REPORT_TITLE)
+    setf(pdf, "", 12)
     today = datetime.date.today().strftime("%d %b %Y")
     greet = f"Hi {first_name}," if first_name else "Hello,"
-    mc(pdf, greet, unicode_ok=unicode_ok)
-    mc(pdf, f"Date: {today}", unicode_ok=unicode_ok)
+    mc(pdf, greet)
+    mc(pdf, f"Date: {today}")
     if email:
-        mc(pdf, f"Email: {email}", unicode_ok=unicode_ok)
+        mc(pdf, f"Email: {email}")
     pdf.ln(1)
 
     if sections.get("archetype") or sections.get("core_need"):
-        label_value(pdf, unicode_ok, "Archetype", sections.get("archetype","") or "—")
-        label_value(pdf, unicode_ok, "Core Need", sections.get("core_need","") or "—")
+        label_value(pdf, "Archetype", sections.get("archetype","") or "—")
+        label_value(pdf, "Core Need", sections.get("core_need","") or "—")
         if sections.get("signature_metaphor"):
-            label_value(pdf, unicode_ok, "Signature Metaphor", sections.get("signature_metaphor",""))
+            label_value(pdf, "Signature Metaphor", sections.get("signature_metaphor",""))
         if sections.get("signature_sentence"):
-            label_value(pdf, unicode_ok, "Signature Sentence", sections.get("signature_sentence",""))
+            label_value(pdf, "Signature Sentence", sections.get("signature_sentence",""))
         pdf.ln(1)
 
-    setf(pdf, unicode_ok, "B", 14); mc(pdf, "Top Themes", unicode_ok=unicode_ok)
-    setf(pdf, unicode_ok, "", 12);  mc(pdf, ", ".join(top3), unicode_ok=unicode_ok); pdf.ln(1)
+    setf(pdf, "B", 14); mc(pdf, "Top Themes")
+    setf(pdf, "", 12);  mc(pdf, ", ".join(top3)); pdf.ln(1)
 
-    draw_scores_barchart(pdf, unicode_ok, scores)
+    draw_scores_barchart(pdf, scores)
 
     fw = sections.get("from_words") or {}
     if isinstance(fw, dict) and (fw.get("insight") or fw.get("themes") or fw.get("quotes")):
-        quotes = [f'"{q}"' for q in fw.get("quotes", []) if q]
-        left_bar_callout(pdf, unicode_ok, "From your words", fw.get("insight",""), bullets=quotes)
+        quotes = [f'"{_ascii_only(q)}"' for q in fw.get("quotes", []) if q]
+        left_bar_callout(pdf, "From your words", _ascii_only(fw.get("insight","")), bullets=quotes)
         keep = [("Daily ritual", fw.get("ritual","")),
                 ("Connection moment", fw.get("relationship_moment","")),
                 ("Stress reset", fw.get("stress_reset",""))]
         if any(v for _, v in keep):
-            setf(pdf, unicode_ok, "B", 12); mc(pdf, "One-liners to keep", unicode_ok=unicode_ok)
-            setf(pdf, unicode_ok, "", 12)
+            setf(pdf, "B", 12); mc(pdf, "One-liners to keep")
+            setf(pdf, "", 12)
             for lbl, val in keep:
-                if val: mc(pdf, f"{lbl}: {val}", unicode_ok=unicode_ok)
+                if val: mc(pdf, f"{lbl}: {_ascii_only(val)}")
             pdf.ln(1)
     if sections.get("micro_pledge"):
-        label_value(pdf, unicode_ok, "Personal pledge", sections["micro_pledge"]); pdf.ln(1)
+        label_value(pdf, "Personal pledge", _ascii_only(sections["micro_pledge"])); pdf.ln(1)
 
     if sections.get("deep_insight"):
-        paragraph(pdf, unicode_ok, "What this really says about you", sections["deep_insight"])
+        paragraph(pdf, "What this really says about you", _ascii_only(sections["deep_insight"]))
     if sections.get("why_now"):
-        label_value(pdf, unicode_ok, "Why this matters now", sections["why_now"]); pdf.ln(1)
+        label_value(pdf, "Why this matters now", _ascii_only(sections["why_now"])); pdf.ln(1)
 
     if sections.get("future_snapshot"):
-        future_callout(pdf, unicode_ok, sections.get("horizon_weeks", 4), sections["future_snapshot"])
+        future_callout(pdf, sections.get("horizon_weeks", 4), _ascii_only(sections["future_snapshot"]))
 
     if sections.get("strengths"):
-        setf(pdf, unicode_ok, "B", 14); mc(pdf, "Signature strengths", unicode_ok=unicode_ok)
-        setf(pdf, unicode_ok, "", 12)
+        setf(pdf, "B", 14); mc(pdf, "Signature strengths")
+        setf(pdf, "", 12)
         for s in sections["strengths"]:
-            pdf.cell(4, 6, "*"); mc(pdf, s, unicode_ok=unicode_ok)
+            pdf.cell(4, 6, "*"); mc(pdf, _ascii_only(s))
         pdf.ln(1)
 
     if sections.get("energizers") or sections.get("drainers"):
-        setf(pdf, unicode_ok, "B", 14); mc(pdf, "Energy map", unicode_ok=unicode_ok)
-        setf(pdf, unicode_ok, "B", 12); mc(pdf, "Energizers", unicode_ok=unicode_ok)
-        setf(pdf, unicode_ok, "", 12)
+        setf(pdf, "B", 14); mc(pdf, "Energy map")
+        setf(pdf, "B", 12); mc(pdf, "Energizers")
+        setf(pdf, "", 12)
         for e in sections.get("energizers", []):
-            pdf.cell(4, 6, "+"); mc(pdf, e, unicode_ok=unicode_ok)
+            pdf.cell(4, 6, "+"); mc(pdf, _ascii_only(e))
         pdf.ln(1)
-        setf(pdf, unicode_ok, "B", 12); mc(pdf, "Drainers", unicode_ok=unicode_ok)
-        setf(pdf, unicode_ok, "", 12)
+        setf(pdf, "B", 12); mc(pdf, "Drainers")
+        setf(pdf, "", 12)
         for d in sections.get("drainers", []):
-            pdf.cell(4, 6, "-"); mc(pdf, d, unicode_ok=unicode_ok)
+            pdf.cell(4, 6, "-"); mc(pdf, _ascii_only(d))
         pdf.ln(1)
 
     if sections.get("tensions"):
-        setf(pdf, unicode_ok, "B", 14); mc(pdf, "Hidden tensions", unicode_ok=unicode_ok)
-        setf(pdf, unicode_ok, "", 12)
+        setf(pdf, "B", 14); mc(pdf, "Hidden tensions")
+        setf(pdf, "", 12)
         for t in sections["tensions"]:
-            pdf.cell(4, 6, "*"); mc(pdf, t, unicode_ok=unicode_ok)
+            pdf.cell(4, 6, "*"); mc(pdf, _ascii_only(t))
         pdf.ln(1)
     if sections.get("blindspot"):
-        label_value(pdf, unicode_ok, "Watch-out (gentle blind spot)", sections["blindspot"]); pdf.ln(1)
+        label_value(pdf, "Watch-out (gentle blind spot)", _ascii_only(sections["blindspot"])); pdf.ln(1)
 
     if sections.get("actions"):
-        setf(pdf, unicode_ok, "B", 14); mc(pdf, "3 next-step actions (7 days)", unicode_ok=unicode_ok)
-        setf(pdf, unicode_ok, "", 12)
+        setf(pdf, "B", 14); mc(pdf, "3 next-step actions (7 days)")
+        setf(pdf, "", 12)
         for a in sections["actions"]:
-            checkbox_line(pdf, unicode_ok, a)
+            checkbox_line(pdf, _ascii_only(a))
         pdf.ln(1)
 
     if sections.get("if_then"):
-        setf(pdf, unicode_ok, "B", 14); mc(pdf, "Implementation intentions (If–Then)", unicode_ok=unicode_ok)
-        setf(pdf, unicode_ok, "", 12)
+        setf(pdf, "B", 14); mc(pdf, "Implementation intentions (If–Then)")
+        setf(pdf, "", 12)
         for it in sections.get("if_then", []):
-            pdf.cell(4, 6, "*"); mc(pdf, it, unicode_ok=unicode_ok)
+            pdf.cell(4, 6, "*"); mc(pdf, _ascii_only(it))
         pdf.ln(1)
 
     if sections.get("weekly_plan"):
-        setf(pdf, unicode_ok, "B", 14); mc(pdf, "1-week gentle plan", unicode_ok=unicode_ok)
-        setf(pdf, unicode_ok, "", 12)
+        setf(pdf, "B", 14); mc(pdf, "1-week gentle plan")
+        setf(pdf, "", 12)
         for i, item in enumerate(sections["weekly_plan"][:7]):
-            mc(pdf, f"Day {i+1}: {item}", unicode_ok=unicode_ok)
+            mc(pdf, f"Day {i+1}: {_ascii_only(item)}")
         pdf.ln(1)
 
     lows = [name for name, _ in sorted(scores.items(), key=lambda x: x[1])[:2]]
     if lows:
-        setf(pdf, unicode_ok, "B", 14); mc(pdf, "Balancing Opportunity", unicode_ok=unicode_ok)
-        setf(pdf, unicode_ok, "", 12)
+        setf(pdf, "B", 14); mc(pdf, "Balancing Opportunity")
+        setf(pdf, "", 12)
         for theme in lows:
             tip = balancing_suggestion(theme)
-            mc(pdf, f"{theme}: {tip}", unicode_ok=unicode_ok)
+            mc(pdf, f"{theme}: {tip}")
         pdf.ln(1)
 
     if sections.get("affirmation") or sections.get("quote"):
-        setf(pdf, unicode_ok, "B", 12); mc(pdf, "Keep this in view", unicode_ok=unicode_ok)
-        setf(pdf, unicode_ok, "I", 11)
+        setf(pdf, "B", 12); mc(pdf, "Keep this in view")
+        setf(pdf, "I", 11)
         if sections.get("affirmation"):
-            mc(pdf, f"Affirmation: {sections['affirmation']}", unicode_ok=unicode_ok)
+            mc(pdf, f"Affirmation: {_ascii_only(sections['affirmation'])}")
         if sections.get("quote"):
-            qtext = f"\"{sections['quote']}\""
-            mc(pdf, qtext, unicode_ok=unicode_ok)
+            mc(pdf, f"\"{_ascii_only(sections['quote'])}\"")
         pdf.ln(2)
-        setf(pdf, unicode_ok, "", 12)
+        setf(pdf, "", 12)
 
     if free_responses:
-        setf(pdf, unicode_ok, "B", 14); mc(pdf, "Your words we heard", unicode_ok=unicode_ok)
-        setf(pdf, unicode_ok, "", 12)
+        setf(pdf, "B", 14); mc(pdf, "Your words we heard")
+        setf(pdf, "", 12)
         for fr in free_responses:
             if not fr.get("answer"): continue
-            mc(pdf, f"* {fr.get('question','')}", unicode_ok=unicode_ok)
-            mc(pdf, f"  {fr.get('answer','')}", unicode_ok=unicode_ok)
+            mc(pdf, f"* {fr.get('question','')}")
+            mc(pdf, f"  {_ascii_only(fr.get('answer',''))}")
             pdf.ln(1)
 
     pdf.ln(3)
-    setf(pdf, unicode_ok, "B", 12)
-    mc(pdf, "On the next page: a printable 'Signature Week — At a glance' checklist you can use right away.", unicode_ok=unicode_ok)
+    setf(pdf, "B", 12)
+    mc(pdf, "On the next page: a printable 'Signature Week — At a glance' checklist you can use right away.")
 
     pdf.add_page()
-    setf(pdf, unicode_ok, "B", 16)
-    mc(pdf, "Signature Week — At a glance", unicode_ok=unicode_ok)
-    setf(pdf, unicode_ok, "", 12)
-    mc(pdf, "A simple plan you can print or screenshot. Check items off as you go.", unicode_ok=unicode_ok)
+    setf(pdf, "B", 16); mc(pdf, "Signature Week — At a glance")
+    setf(pdf, "", 12)
+    mc(pdf, "A simple plan you can print or screenshot. Check items off as you go.")
     pdf.ln(2)
 
     week_items = sections.get("weekly_plan") or []
@@ -701,11 +603,11 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         x = pdf.get_x(); y = pdf.get_y()
         pdf.rect(x, y + 1.5, 4, 4)
         pdf.set_x(x + 6)
-        mc(pdf, f"Day {i+1}: {item}", unicode_ok=unicode_ok)
+        mc(pdf, f"Day {i+1}: {_ascii_only(item)}")
 
     pdf.ln(2)
-    setf(pdf, unicode_ok, "B", 14); mc(pdf, "Tiny Progress Tracker", unicode_ok=unicode_ok)
-    setf(pdf, unicode_ok, "", 12)
+    setf(pdf, "B", 14); mc(pdf, "Tiny Progress Tracker")
+    setf(pdf, "", 12)
     milestones = sections.get("actions") or [
         "Choose one tiny step and schedule it.",
         "Tell a friend your plan for gentle accountability.",
@@ -715,19 +617,18 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         x = pdf.get_x(); y = pdf.get_y()
         pdf.rect(x, y + 1.5, 4, 4)
         pdf.set_x(x + 6)
-        mc(pdf, m, unicode_ok=unicode_ok)
+        mc(pdf, _ascii_only(m))
     pdf.ln(2)
 
-    setf(pdf, unicode_ok, "I", 10); pdf.ln(2)
-    mc(pdf, "Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice.", unicode_ok=unicode_ok)
-    setf(pdf, unicode_ok, "", 12)
+    setf(pdf, "I", 10); pdf.ln(2)
+    mc(pdf, "Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice.")
+    setf(pdf, "", 12)
 
+    # fpdf 1.7.2 returns STR (latin-1) with dest="S"
     raw = pdf.output(dest="S")
-    return raw if isinstance(raw, bytes) else str(raw).encode("latin-1", errors="replace")
+    return raw.encode("latin-1", errors="replace") if isinstance(raw, str) else to_bytes(raw)
 
-# -----------------------------
-# UI FLOW
-# -----------------------------
+# ---------- UI ----------
 st.title(APP_TITLE)
 st.write("Answer 15 questions, add your own reflections, and instantly download a personalized PDF summary.")
 
@@ -738,16 +639,14 @@ first_name = st.text_input("First name", st.session_state["first_name"])
 if first_name:
     st.session_state["first_name"] = first_name.strip()
 
-# Load questions
+# Questions
 questions, _ = load_questions()
-
 answers: Dict[str, dict] = {}
 free_responses: List[dict] = []
 
 with st.expander("Personalization options"):
     horizon_weeks = st.slider("Future snapshot horizon (weeks)", 2, 8, 4)
 
-# Render questions
 for q in questions:
     st.subheader(q["text"])
     options = [c["label"] for c in q["choices"]] + ["✍️ I'll write my own answer"]
@@ -831,7 +730,7 @@ if st.session_state.get("request_report"):
 
         if maybe:
             sections.update(maybe)
-            # fold weights into scores (only those the model returned)
+            # fold any weights into scores
             weights = sections.get("weights") or {}
             for qid, wmap in weights.items():
                 for theme, delta in wmap.items():
@@ -920,7 +819,7 @@ if st.session_state.get("request_report"):
     except Exception as e:
         st.caption(f"Could not save responses (demo only). {e}")
 
-# Debug tool
+# ---------- AI status quick test ----------
 with st.expander("AI status (debug)", expanded=False):
     st.write("AI enabled:", USE_AI)
     st.write("Model:", HIGH_MODEL)
