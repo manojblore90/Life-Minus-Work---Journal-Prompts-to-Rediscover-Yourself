@@ -1,5 +1,5 @@
-# app.py — Life Minus Work (stable form + robust AI JSON + fpdf 1.7.2)
-# -------------------------------------------------------------------
+# app.py — Life Minus Work (live write-in UX + robust AI JSON + fpdf 1.7.2)
+# -------------------------------------------------------------------------
 import os, sys, re, json, unicodedata, datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -66,7 +66,6 @@ def clean_text(s: str, max_len: int = 1000, ascii_fallback: bool = False) -> str
         s = str(s)
     s = unicodedata.normalize("NFKC", s)
     s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", s)  # strip control chars
-    # guard super-long tokens (can crash fpdf line breaking)
     tokens = []
     for t in s.split():
         tokens.append(t if len(t) <= max_len else t[:max_len] + "...")
@@ -75,15 +74,8 @@ def clean_text(s: str, max_len: int = 1000, ascii_fallback: bool = False) -> str
         s = _ascii_only(s)
     return s
 
-# ---------- width-safe MultiCell (prevents fpdf line_break crash) ----------
+# ---------- width-safe MultiCell ----------
 def mc(pdf: "FPDF", text: str, h: float = 6, unicode_ok: bool = False):
-    """
-    Crash-proof MultiCell for fpdf 1.7.2:
-      - explicit width (avoid width=0)
-      - normalize text
-      - retries with ASCII
-      - final fallback prints a safe line
-    """
     try:
         w = float(pdf.w) - float(pdf.l_margin) - float(pdf.r_margin)
     except Exception:
@@ -114,7 +106,7 @@ def mc(pdf: "FPDF", text: str, h: float = 6, unicode_ok: bool = False):
     except Exception:
         return
 
-# ---------- bytes safety for Streamlit download ----------
+# ---------- bytes safety ----------
 def to_bytes(x: Any) -> bytes:
     if x is None:
         return b""
@@ -133,7 +125,6 @@ def to_bytes(x: Any) -> bytes:
     except Exception:
         return bytes(str(x), "utf-8", "ignore")
 
-# ---------- simple Helvetica font setter (fpdf 1.7.2 core fonts) ----------
 def setf(pdf: FPDF, style: str = "", size: int = 12):
     pdf.set_font("Helvetica", style or "", size)
 
@@ -251,7 +242,6 @@ def ai_sections_and_weights(scores, top3, free_responses, first_name, horizon_we
 
         score_lines = ", ".join([f"{k}: {v}" for k, v in scores.items()])
 
-        # STRICT JSON PROMPT (explicit schema, no stray .format())
         prompt = f"""
 You are a warm, practical life coach. Return STRICT JSON ONLY matching this schema:
 
@@ -323,7 +313,6 @@ Tone: empathetic, encouraging, plain language. No medical claims.
                 if not isinstance(data, dict):
                     raise ValueError("No JSON object found in completion.")
 
-                # Save debug
                 st.session_state["ai_debug"] = {
                     "path": path, "cap_used": cap, "raw_head": raw[:800], "raw_len": len(raw),
                 }
@@ -339,7 +328,6 @@ Tone: empathetic, encouraging, plain language. No medical claims.
                 except Exception:
                     pass
 
-                # Extract sections safely
                 sg = lambda k: str(data.get(k, "") or "")
                 out = {
                     "archetype": sg("archetype"),
@@ -366,7 +354,6 @@ Tone: empathetic, encouraging, plain language. No medical claims.
                     "weights": {},
                 }
 
-                # Repair & extract from_words
                 fw = data.get("from_words") or {}
                 if isinstance(fw, dict) and len(fw) == 1:
                     only_key = list(fw.keys())[0]
@@ -387,7 +374,6 @@ Tone: empathetic, encouraging, plain language. No medical claims.
                     "stress_reset": str(fw.get("stress_reset", "")),
                 }
 
-                # weights
                 weights = data.get("weights") or {}
                 if isinstance(weights, dict):
                     clean_w = {}
@@ -484,7 +470,6 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 
-    # important: set core font before any text
     setf(pdf, "B", 18)
 
     if logo_path:
@@ -614,7 +599,8 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         setf(pdf, "B", 14); mc(pdf, "Your words we heard")
         setf(pdf, "", 12)
         for fr in free_responses:
-            if not fr.get("answer"): continue
+            if not fr.get("answer"): 
+                continue
             mc(pdf, f"* {fr.get('question','')}")
             mc(pdf, f"  {_ascii_only(fr.get('answer',''))}")
             pdf.ln(1)
@@ -682,69 +668,81 @@ if "answers" not in st.session_state:
 with st.expander("Personalization options"):
     horizon_weeks = st.slider("Future snapshot horizon (weeks)", 2, 8, 4)
 
-# === Questionnaire (stable; clean write-in UX) ===
-with st.form("quiz_form", clear_on_submit=False):
-    pending_answers = {}
+# === Questionnaire (LIVE — no forms; write-in appears instantly) ===
+st.subheader("Questions")
 
-    for q in questions:
-        qid = q["id"]
-        st.subheader(q["text"])
+def _save_choice(qid, base_options, placeholder, write_in_label):
+    choice_label = st.session_state.get(f"{qid}_choice_radio")
+    if choice_label == placeholder:
+        st.session_state["answers"][qid] = {
+            "choice_idx": None,
+            "free_text": st.session_state["answers"].get(qid, {}).get("free_text","")
+        }
+    elif choice_label == write_in_label:
+        prev = st.session_state["answers"].get(qid, {})
+        st.session_state["answers"][qid] = {"choice_idx": None, "free_text": prev.get("free_text","")}
+    else:
+        try:
+            idx = base_options.index(choice_label)
+        except ValueError:
+            idx = None
+        st.session_state["answers"][qid] = {"choice_idx": idx, "free_text": ""}
 
-        base_options = [c["label"] for c in q["choices"]]
-        write_in_label = "✍️ I'll write my own answer"
-        placeholder = "— Select —"
-        options = [placeholder] + base_options + [write_in_label]
+def _save_free(qid):
+    val = (st.session_state.get(f"{qid}_free_text") or "").strip()
+    prev = st.session_state["answers"].get(qid, {})
+    if st.session_state.get(f"{qid}_choice_radio") == "✍️ I'll write my own answer":
+        st.session_state["answers"][qid] = {"choice_idx": None, "free_text": val}
+    else:
+        st.session_state["answers"][qid] = {"choice_idx": prev.get("choice_idx"), "free_text": ""}
 
-        saved = st.session_state["answers"].get(qid, {})
-        saved_idx = saved.get("choice_idx", None)
-        saved_free = saved.get("free_text", "")
+for q in questions:
+    qid = q["id"]
+    st.markdown(f"### {q['text']}")
 
-        if isinstance(saved_idx, int) and 0 <= saved_idx < len(base_options):
-            radio_index = 1 + saved_idx  # offset by placeholder
-        elif saved_free:
-            radio_index = len(options) - 1  # write-in selected
-        else:
-            radio_index = 0  # placeholder
+    base_options = [c["label"] for c in q["choices"]]
+    write_in_label = "✍️ I'll write my own answer"
+    placeholder = "— Select —"
+    options = [placeholder] + base_options + [write_in_label]
 
-        choice_label = st.radio(
-            "Choose one:",
-            options,
-            index=radio_index,
-            key=f"{qid}_choice_radio",
+    saved = st.session_state["answers"].get(qid, {})
+    saved_idx = saved.get("choice_idx", None)
+    saved_free = saved.get("free_text", "")
+
+    if isinstance(saved_idx, int) and 0 <= saved_idx < len(base_options):
+        current_label = base_options[saved_idx]
+    elif saved_free:
+        current_label = write_in_label
+    else:
+        current_label = placeholder
+
+    st.session_state.setdefault(f"{qid}_choice_radio", current_label)
+
+    st.radio(
+        "Choose one:",
+        options,
+        key=f"{qid}_choice_radio",
+        on_change=_save_choice,
+        args=(qid, base_options, placeholder, write_in_label),
+        horizontal=False,
+    )
+
+    if st.session_state.get(f"{qid}_choice_radio") == write_in_label:
+        st.text_area(
+            "Your answer",
+            value=saved_free,
+            key=f"{qid}_free_text",
+            height=80,
+            placeholder="Type your own response…",
+            on_change=_save_free,
+            args=(qid,),
         )
 
-        use_free = (choice_label == write_in_label)
+    st.divider()
 
-        free_val = saved_free
-        if use_free:
-            free_val = st.text_area(
-                "Your answer",
-                value=saved_free,
-                key=f"{qid}_free_text",
-                height=80,
-                placeholder="Type your own response…",
-            )
-
-        if choice_label == placeholder:
-            choice_idx = None
-            free_text = ""
-        elif use_free:
-            choice_idx = None
-            free_text = (free_val or "").strip()
-        else:
-            try:
-                choice_idx = base_options.index(choice_label)
-            except ValueError:
-                choice_idx = None
-            free_text = ""
-
-        pending_answers[qid] = {"choice_idx": choice_idx, "free_text": free_text}
-        st.divider()
-
-    saved_clicked = st.form_submit_button("Save my answers")
-    if saved_clicked:
-        st.session_state["answers"].update(pending_answers)
-        st.success("Saved! Scroll down to generate your PDF when ready.")
+# Optional manual snapshot button (data already lives in session_state)
+if st.button("Save my answers"):
+    st.success("Saved! Scroll down to generate your PDF when ready.")
 
 # Email + consent
 st.subheader("Email & Download")
@@ -769,12 +767,10 @@ with st.form("finish_form"):
 if st.session_state.get("request_report"):
     st.session_state["request_report"] = False
 
-    # Use stable answers saved by the form
     answers = st.session_state.get("answers", {})
     scores = compute_scores(answers, questions)
     top3 = top_themes(scores, 3)
 
-    # Build free_responses from saved store
     free_responses = []
     for q in questions:
         qid = q["id"]
@@ -820,7 +816,6 @@ if st.session_state.get("request_report"):
 
         if maybe:
             sections.update(maybe)
-            # fold any weights into scores
             weights = sections.get("weights") or {}
             for qid, wmap in weights.items():
                 for theme, delta in wmap.items():
