@@ -1,8 +1,8 @@
-# app.py — Life Minus Work (full build, width-safe mc + Unicode PDF + robust AI)
+# app.py — Life Minus Work (width-safe PDF + bytes-safe download + robust AI)
 # ----------------------------------------------------------------------------------
 import os, sys, re, json, unicodedata, datetime
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union, Any
 
 import streamlit as st
 from PIL import Image
@@ -86,7 +86,7 @@ def clean_text(s: str, max_len: int = 1000, ascii_fallback: bool = False) -> str
     return s
 
 # ----------------------------------------------------------------------------------
-# WIDTH‑SAFE MULTICELL
+# WIDTH‑SAFE MULTICELL (prevents line_break crashes)
 # ----------------------------------------------------------------------------------
 def mc(pdf: "FPDF", text: str, h: float = 6, unicode_ok: bool = True):
     """
@@ -130,6 +130,35 @@ def mc(pdf: "FPDF", text: str, h: float = 6, unicode_ok: bool = True):
         pdf.multi_cell(w, h, "[...content truncated...]")
     except Exception:
         return
+
+# ----------------------------------------------------------------------------------
+# BYTES SAFETY for download_button
+# ----------------------------------------------------------------------------------
+def to_bytes(x: Any) -> bytes:
+    """
+    Coerce any reasonable object to bytes for st.download_button.
+    Prevents 'Invalid binary data format' errors.
+    """
+    if x is None:
+        return b""
+    if isinstance(x, bytes):
+        return x
+    if isinstance(x, bytearray):
+        return bytes(x)
+    # file-like with .read()
+    if hasattr(x, "read"):
+        try:
+            data = x.read()
+            return data if isinstance(data, bytes) else bytes(str(data), "utf-8", "ignore")
+        except Exception:
+            return b""
+    if isinstance(x, str):
+        # Latin-1 is safest for old core fonts; use replace to avoid exceptions
+        return x.encode("latin-1", errors="replace")
+    try:
+        return bytes(x)
+    except Exception:
+        return bytes(str(x), "utf-8", "ignore")
 
 # ----------------------------------------------------------------------------------
 # UNICODE PDF (TTF) SUPPORT
@@ -343,7 +372,7 @@ def ai_sections_and_weights(scores, top3, free_responses, first_name, horizon_we
             "IMPORTANT: Only use question_id keys for 'weights' from this list:\n"
             f"{json.dumps(allowed_ids, ensure_ascii=False)}\n"
             "Tone: empathetic, encouraging, plain language. No medical claims. JSON only."
-        ).format(h=horizon_weeks)
+        ).format(horizon_weeks)
 
         system = "Reply with helpful coaching guidance as STRICT JSON only."
         tries = [MAX_TOK_HIGH, 6000, 4000, FALLBACK_CAP, 2500, 1200]
@@ -448,15 +477,6 @@ def ai_sections_and_weights(scores, top3, free_responses, first_name, horizon_we
 # ----------------------------------------------------------------------------------
 # PDF RENDER HELPERS
 # ----------------------------------------------------------------------------------
-def setf(pdf: FPDF, unicode_ok: bool, style: str = "", size: int = 12):
-    if unicode_ok:
-        try:
-            pdf.set_font("LMW", style or "", size)
-        except Exception:
-            pdf.set_font("LMW", "", size)
-    else:
-        pdf.set_font("Helvetica", style or "", size)
-
 def draw_scores_barchart(pdf: FPDF, unicode_ok: bool, scores: Dict[str, int]):
     setf(pdf, unicode_ok, "B", 14)
     mc(pdf, "Your Theme Snapshot", unicode_ok=unicode_ok)
@@ -526,30 +546,6 @@ def left_bar_callout(pdf: FPDF, unicode_ok: bool, title: str, body: str, bullets
 # ----------------------------------------------------------------------------------
 # PDF MAKE
 # ----------------------------------------------------------------------------------
-def get_logo_png_path() -> Optional[str]:
-    here = Path(__file__).parent
-    candidates = [
-        here / "logo.png",
-        here / "Life-Minus-Work-Logo.png",
-        here / "Life-Minus-Work-Logo.webp",
-        here / "assets" / "logo.png",
-        here / "assets" / "Life-Minus-Work-Logo.png",
-        here / "assets" / "Life-Minus-Work-Logo.webp",
-    ]
-    for p in candidates:
-        if p.exists():
-            if p.suffix.lower() == ".png":
-                return str(p)
-            if p.suffix.lower() == ".webp":
-                try:
-                    img = Image.open(p).convert("RGB")
-                    out = Path("/tmp/logo.png")
-                    img.save(out, format="PNG")
-                    return str(out)
-                except Exception:
-                    return None
-    return None
-
 def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: List[str],
                    sections: dict, free_responses: List[dict], logo_path: Optional[str]) -> bytes:
     pdf, unicode_ok = create_pdf_with_unicode()
@@ -732,9 +728,12 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
     setf(pdf, unicode_ok, "", 12)
 
     raw = pdf.output(dest="S")
+    # Coerce to bytes defensively
+    if isinstance(raw, bytes):
+        return raw
     if isinstance(raw, str):
-        raw = raw.encode("latin-1", errors="replace")
-    return raw
+        return raw.encode("latin-1", errors="replace")
+    return to_bytes(raw)
 
 # ----------------------------------------------------------------------------------
 # APP UI
@@ -900,14 +899,18 @@ if st.session_state.get("request_report"):
         free_responses,
         logo_path,
     )
-
-    st.success("Your personalized report is ready!")
-    st.download_button(
-        "📥 Download Your PDF Report",
-        data=pdf_bytes,
-        file_name="LifeMinusWork_Reflection_Report.pdf",
-        mime="application/pdf",
-    )
+    # Hard guarantee bytes for Streamlit
+    safe_bytes = to_bytes(pdf_bytes)
+    if not safe_bytes:
+        st.error("We couldn't finalize the PDF bytes. Please re-run generation (the data was prepared fine).")
+    else:
+        st.success("Your personalized report is ready!")
+        st.download_button(
+            "📥 Download Your PDF Report",
+            data=safe_bytes,
+            file_name="LifeMinusWork_Reflection_Report.pdf",
+            mime="application/pdf",
+        )
 
     # Optional CSV logging (ephemeral)
     try:
