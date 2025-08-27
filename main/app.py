@@ -1,6 +1,4 @@
-# app.py — Life Minus Work (live write-in UX + robust AI JSON + fpdf 1.7.2)
-# -------------------------------------------------------------------------
-import os, sys, re, json, unicodedata, datetime
+import os, sys, re, json, hashlib, unicodedata, datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -8,13 +6,12 @@ import streamlit as st
 from PIL import Image
 from fpdf import FPDF
 
-# ---------- OpenAI ----------
+# ========== OpenAI ==========
 try:
     from openai import OpenAI
 except Exception:
     OpenAI = None
 
-# ---------- App config ----------
 APP_TITLE    = "Life Minus Work — Reflection Quiz (15 questions)"
 REPORT_TITLE = "Your Reflection Report"
 THEMES       = ["Identity", "Growth", "Connection", "Peace", "Adventure", "Contribution"]
@@ -38,7 +35,7 @@ HIGH_MODEL = get_secret("OPENAI_HIGH_MODEL", "gpt-5-mini")
 MAX_TOK_HIGH = int(get_secret("MAX_OUTPUT_TOKENS_HIGH", "8000"))
 FALLBACK_CAP = int(get_secret("MAX_OUTPUT_TOKENS_FALLBACK", "7000"))
 
-# ---------- TEMP diagnostics ----------
+# --------- Diagnostics (temporary) ----------
 with st.expander("🔧 Diagnostics (temporary)", expanded=False):
     st.write("Python:", sys.version.split()[0])
     here = Path(__file__).parent
@@ -52,7 +49,7 @@ with st.expander("🔧 Diagnostics (temporary)", expanded=False):
     st.write("OPENAI_API_KEY present:", bool(OPENAI_API_KEY), "| key:", masked if OPENAI_API_KEY else "—")
     st.write("Model:", HIGH_MODEL, "| MAX_TOK_HIGH:", MAX_TOK_HIGH, "| FALLBACK_CAP:", FALLBACK_CAP)
 
-# ---------- Text cleaning / fallbacks ----------
+# --------- Helpers: text safety ----------
 def _ascii_only(s: str) -> str:
     return (s.replace("’", "'").replace("‘", "'")
              .replace("“", '"').replace("”", '"')
@@ -68,52 +65,16 @@ def clean_text(s: str, max_len: int = 1000, ascii_fallback: bool = False) -> str
     s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", s)  # strip control chars
     tokens = []
     for t in s.split():
-        tokens.append(t if len(t) <= max_len else t[:max_len] + "...")
+        tokens.append(t if len(t) <= max_len else t[:max_len] + "…")
     s = " ".join(tokens)
     if ascii_fallback:
         s = _ascii_only(s)
     return s
 
-# ---------- width-safe MultiCell ----------
-def mc(pdf: "FPDF", text: str, h: float = 6, unicode_ok: bool = False):
-    try:
-        w = float(pdf.w) - float(pdf.l_margin) - float(pdf.r_margin)
-    except Exception:
-        w = 180.0
-    if w <= 0:
-        w = 180.0
-
-    s = clean_text((text or "").replace("\r\n", "\n").replace("\r", "\n"),
-                   ascii_fallback=not unicode_ok)
-
-    try:
-        pdf.multi_cell(w, h, s)
-        return
-    except Exception:
-        pass
-    try:
-        s2 = clean_text(s, ascii_fallback=True)
-        pdf.multi_cell(w, h, s2)
-        return
-    except Exception:
-        pass
-    try:
-        pdf.set_font("Helvetica", "", 12)
-    except Exception:
-        pass
-    try:
-        pdf.multi_cell(w, h, "[...content truncated...]")
-    except Exception:
-        return
-
-# ---------- bytes safety ----------
 def to_bytes(x: Any) -> bytes:
-    if x is None:
-        return b""
-    if isinstance(x, (bytes, bytearray)):
-        return bytes(x)
-    if isinstance(x, str):
-        return x.encode("latin-1", errors="replace")
+    if x is None: return b""
+    if isinstance(x, (bytes, bytearray)): return bytes(x)
+    if isinstance(x, str): return x.encode("latin-1", errors="replace")
     if hasattr(x, "read"):
         try:
             data = x.read()
@@ -125,10 +86,34 @@ def to_bytes(x: Any) -> bytes:
     except Exception:
         return bytes(str(x), "utf-8", "ignore")
 
+# --------- PDF MultiCell wrapper ----------
+def mc(pdf: "FPDF", text: str, h: float = 6, unicode_ok: bool = False):
+    try:
+        w = float(pdf.w) - float(pdf.l_margin) - float(pdf.r_margin)
+    except Exception:
+        w = 180.0
+    if w <= 0: w = 180.0
+    s = clean_text((text or "").replace("\r\n", "\n").replace("\r", "\n"),
+                   ascii_fallback=not unicode_ok)
+    try:
+        pdf.multi_cell(w, h, s); return
+    except Exception:
+        pass
+    try:
+        s2 = clean_text(s, ascii_fallback=True)
+        pdf.multi_cell(w, h, s2); return
+    except Exception:
+        pass
+    try:
+        pdf.set_font("Helvetica", "", 12)
+        pdf.multi_cell(w, h, "[...content truncated...]")
+    except Exception:
+        return
+
 def setf(pdf: FPDF, style: str = "", size: int = 12):
     pdf.set_font("Helvetica", style or "", size)
 
-# ---------- Logo ----------
+# --------- Logo ----------
 def get_logo_png_path() -> Optional[str]:
     here = Path(__file__).parent
     candidates = [
@@ -153,29 +138,39 @@ def get_logo_png_path() -> Optional[str]:
                     return None
     return None
 
-# ---------- Load questions ----------
-def load_questions(filename="questions.json"):
+# --------- Questions loading w/ stable version ----------
+@st.cache_data(show_spinner=False)
+def load_questions_cached(filename: str = "questions.json"):
     base_dir = Path(__file__).parent
     path = base_dir / filename
     if not path.exists():
-        st.error(f"Could not find {filename} at {path}. Make sure it's next to app.py.")
+        raise FileNotFoundError(f"{filename} not found at {path}")
+    raw = path.read_text(encoding="utf-8")
+    data = json.loads(raw)
+    # Stable hash of questions content to detect meaningful changes
+    version = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+    return data["questions"], data.get("themes", []), version
+
+def load_questions(filename="questions.json"):
+    try:
+        return load_questions_cached(filename)
+    except FileNotFoundError as e:
+        st.error(f"Could not find {filename}. Make sure it's next to app.py.")
+        here = Path(__file__).parent
         try:
             st.caption("Directory listing:")
-            for p in base_dir.iterdir():
+            for p in here.iterdir():
                 st.write("-", p.name)
         except Exception:
             pass
         st.stop()
-    with path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-    return data["questions"], data.get("themes", [])
 
-# ---------- Scoring ----------
-def compute_scores(answers: dict, questions: list) -> Dict[str, int]:
+# --------- Scoring ----------
+def compute_scores(answers_by_qid: dict, questions: list) -> Dict[str, int]:
     scores = {t: 0 for t in THEMES}
     for q in questions:
         qid = q["id"]
-        choice_idx = answers.get(qid, {}).get("choice_idx")
+        choice_idx = answers_by_qid.get(qid, {}).get("choice_idx")
         if choice_idx is None:
             continue
         try:
@@ -200,17 +195,17 @@ def balancing_suggestion(theme: str) -> str:
     }
     return suggestions.get(theme, "Take one small, visible step this week.")
 
-# ---------- OpenAI (strict JSON + token tracker) ----------
+# --------- OpenAI (strict JSON) ----------
 def _call_openai_json(model: str, system: str, user: str, cap: int):
     if not (USE_AI and OpenAI):
         raise RuntimeError("OpenAI not configured")
     client = OpenAI()
-    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     r = client.chat.completions.create(
         model=model,
-        messages=messages,
-        max_completion_tokens=cap,               # IMPORTANT with new SDK/models
-        response_format={"type": "json_object"}, # strict JSON
+        messages=[{"role": "system", "content": system},
+                  {"role": "user", "content": user}],
+        max_completion_tokens=cap,
+        response_format={"type": "json_object"},
     )
     content = r.choices[0].message.content if r.choices else ""
     usage = getattr(r, "usage", None)
@@ -248,7 +243,7 @@ You are a warm, practical life coach. Return STRICT JSON ONLY matching this sche
 {{
   "archetype": string,
   "core_need": string,
-  "deep_insight": string,              // 400–600 words, address user by first name
+  "deep_insight": string,              // 400–600 words
   "why_now": string,                   // 120–180 words
   "strengths": [string, ...],          // 4–6
   "energizers": [string, ...],         // 4
@@ -274,7 +269,7 @@ You are a warm, practical life coach. Return STRICT JSON ONLY matching this sche
     "stress_reset": string
   }},
   "micro_pledge": string,              // first-person, <= 28 words
-  "weights": {{                        // question_id -> theme deltas in [-2,2]
+  "weights": {{
     "<question_id>": {{"Identity": int, "Growth": int, "Connection": int, "Peace": int, "Adventure": int, "Contribution": int}}
   }}
 }}
@@ -289,10 +284,8 @@ Free-text answers (array of objects with id, q, a): {json.dumps(packed, ensure_a
 IMPORTANT: Only use these IDs as keys inside "weights": {json.dumps(allowed_ids, ensure_ascii=False)}
 Tone: empathetic, encouraging, plain language. No medical claims.
 """
-
         system = "Reply with helpful coaching guidance as STRICT JSON only."
         tries = [MAX_TOK_HIGH, FALLBACK_CAP, 6000, 4000, 2500, 1200]
-
         last_err = None
         for cap in tries:
             try:
@@ -301,7 +294,6 @@ Tone: empathetic, encouraging, plain language. No medical claims.
                 if raw.startswith("```"):
                     raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
                     raw = re.sub(r"\n```$", "", raw)
-
                 data = None
                 try:
                     data = json.loads(raw)
@@ -309,7 +301,6 @@ Tone: empathetic, encouraging, plain language. No medical claims.
                     if "{" in raw and "}" in raw:
                         raw2 = raw[raw.find("{"): raw.rfind("}") + 1]
                         data = json.loads(raw2)
-
                 if not isinstance(data, dict):
                     raise ValueError("No JSON object found in completion.")
 
@@ -402,10 +393,9 @@ Tone: empathetic, encouraging, plain language. No medical claims.
         st.session_state["ai_debug"] = {"fatal": f"{type(e).__name__}: {e}"}
         return None
 
-# ---------- PDF helpers ----------
+# --------- PDF helpers ----------
 def draw_scores_barchart(pdf: FPDF, scores: Dict[str, int]):
-    setf(pdf, "B", 14)
-    mc(pdf, "Your Theme Snapshot")
+    setf(pdf, "B", 14); mc(pdf, "Your Theme Snapshot")
     setf(pdf, "", 12)
     max_score = max(max(scores.values()), 1)
     bar_w_max = 120
@@ -432,9 +422,7 @@ def paragraph(pdf: FPDF, title: str, body: str):
 
 def checkbox_line(pdf: FPDF, text: str):
     x = pdf.get_x(); y = pdf.get_y()
-    pdf.rect(x, y + 1.5, 4, 4)
-    pdf.set_x(x + 6)
-    mc(pdf, text)
+    pdf.rect(x, y + 1.5, 4, 4); pdf.set_x(x + 6); mc(pdf, text)
 
 def label_value(pdf: FPDF, label: str, value: str):
     setf(pdf, "B", 12); mc(pdf, label)
@@ -458,18 +446,14 @@ def left_bar_callout(pdf: FPDF, title: str, body: str, bullets=None):
     pdf.set_x(x + 4)
     setf(pdf, "", 12); mc(pdf, body)
     for b in bullets:
-        pdf.set_x(x + 4)
-        pdf.cell(4, 6, "*")
-        mc(pdf, b)
+        pdf.set_x(x + 4); pdf.cell(4, 6, "*"); mc(pdf, b)
     pdf.ln(1)
 
-# ---------- PDF build ----------
 def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: List[str],
                    sections: dict, free_responses: List[dict], logo_path: Optional[str]) -> bytes:
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-
     setf(pdf, "B", 18)
 
     if logo_path:
@@ -482,10 +466,8 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
     setf(pdf, "", 12)
     today = datetime.date.today().strftime("%d %b %Y")
     greet = f"Hi {first_name}," if first_name else "Hello,"
-    mc(pdf, greet)
-    mc(pdf, f"Date: {today}")
-    if email:
-        mc(pdf, f"Email: {email}")
+    mc(pdf, greet); mc(pdf, f"Date: {today}")
+    if email: mc(pdf, f"Email: {email}")
     pdf.ln(1)
 
     if sections.get("archetype") or sections.get("core_need"):
@@ -592,15 +574,13 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
             mc(pdf, f"Affirmation: {_ascii_only(sections['affirmation'])}")
         if sections.get("quote"):
             mc(pdf, f"\"{_ascii_only(sections['quote'])}\"")
-        pdf.ln(2)
-        setf(pdf, "", 12)
+        pdf.ln(2); setf(pdf, "", 12)
 
     if free_responses:
         setf(pdf, "B", 14); mc(pdf, "Your words we heard")
         setf(pdf, "", 12)
         for fr in free_responses:
-            if not fr.get("answer"): 
-                continue
+            if not fr.get("answer"): continue
             mc(pdf, f"* {fr.get('question','')}")
             mc(pdf, f"  {_ascii_only(fr.get('answer',''))}")
             pdf.ln(1)
@@ -620,8 +600,7 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
         week_items = [f"Do one small action for {t}" for t in top3] + ["Reflect and set next step"]
     for i, item in enumerate(week_items[:7]):
         x = pdf.get_x(); y = pdf.get_y()
-        pdf.rect(x, y + 1.5, 4, 4)
-        pdf.set_x(x + 6)
+        pdf.rect(x, y + 1.5, 4, 4); pdf.set_x(x + 6)
         mc(pdf, f"Day {i+1}: {_ascii_only(item)}")
 
     pdf.ln(2)
@@ -634,67 +613,73 @@ def make_pdf_bytes(first_name: str, email: str, scores: Dict[str,int], top3: Lis
     ]
     for m in milestones[:3]:
         x = pdf.get_x(); y = pdf.get_y()
-        pdf.rect(x, y + 1.5, 4, 4)
-        pdf.set_x(x + 6)
+        pdf.rect(x, y + 1.5, 4, 4); pdf.set_x(x + 6)
         mc(pdf, _ascii_only(m))
-    pdf.ln(2)
 
-    setf(pdf, "I", 10); pdf.ln(2)
+    pdf.ln(2); setf(pdf, "I", 10); pdf.ln(2)
     mc(pdf, "Life Minus Work • This report is a starting point for reflection. Nothing here is medical or financial advice.")
     setf(pdf, "", 12)
 
     raw = pdf.output(dest="S")
     return raw.encode("latin-1", errors="replace") if isinstance(raw, str) else to_bytes(raw)
 
-# ---------- UI ----------
+# --------- UI ----------
 st.title(APP_TITLE)
 st.write("Answer 15 questions, add your own reflections, and instantly download a personalized PDF summary.")
 
-# First name (stable)
-if "first_name" not in st.session_state:
-    st.session_state["first_name"] = ""
+# First name
+st.session_state.setdefault("first_name", "")
 first_name = st.text_input("First name", st.session_state["first_name"])
 if first_name:
     st.session_state["first_name"] = first_name.strip()
 
 # Load questions
-questions, _ = load_questions()
+questions, _, q_version = load_questions()
 
-# --- stable answer store ---
-if "answers" not in st.session_state:
-    st.session_state["answers"] = {}  # qid -> {"choice_idx": int|None, "free_text": str}
+# Stable answers store (by qid) + migrate if version changed
+st.session_state.setdefault("questions_version", q_version)
+st.session_state.setdefault("answers_by_qid", {})  # {qid: {"choice_idx": int|None, "free_text": str}}
+
+if st.session_state["questions_version"] != q_version:
+    # migrate by qid; keep any matches
+    old = st.session_state["answers_by_qid"]
+    new_map = {}
+    existing_ids = {q["id"] for q in questions}
+    for qid, val in old.items():
+        if qid in existing_ids:
+            new_map[qid] = {"choice_idx": val.get("choice_idx"), "free_text": val.get("free_text","")}
+    st.session_state["answers_by_qid"] = new_map
+    st.session_state["questions_version"] = q_version
 
 # Personalization
 with st.expander("Personalization options"):
     horizon_weeks = st.slider("Future snapshot horizon (weeks)", 2, 8, 4)
 
-# === Questionnaire (LIVE — no forms; write-in appears instantly) ===
+# === Questionnaire (no forms; write-in appears instantly) ===
 st.subheader("Questions")
 
 def _save_choice(qid, base_options, placeholder, write_in_label):
-    choice_label = st.session_state.get(f"{qid}_choice_radio")
+    choice_label = st.session_state.get(f"{qid}__choice")
     if choice_label == placeholder:
-        st.session_state["answers"][qid] = {
-            "choice_idx": None,
-            "free_text": st.session_state["answers"].get(qid, {}).get("free_text","")
-        }
+        prev = st.session_state["answers_by_qid"].get(qid, {})
+        st.session_state["answers_by_qid"][qid] = {"choice_idx": None, "free_text": prev.get("free_text","")}
     elif choice_label == write_in_label:
-        prev = st.session_state["answers"].get(qid, {})
-        st.session_state["answers"][qid] = {"choice_idx": None, "free_text": prev.get("free_text","")}
+        prev = st.session_state["answers_by_qid"].get(qid, {})
+        st.session_state["answers_by_qid"][qid] = {"choice_idx": None, "free_text": prev.get("free_text","")}
     else:
         try:
             idx = base_options.index(choice_label)
         except ValueError:
             idx = None
-        st.session_state["answers"][qid] = {"choice_idx": idx, "free_text": ""}
+        st.session_state["answers_by_qid"][qid] = {"choice_idx": idx, "free_text": ""}
 
 def _save_free(qid):
-    val = (st.session_state.get(f"{qid}_free_text") or "").strip()
-    prev = st.session_state["answers"].get(qid, {})
-    if st.session_state.get(f"{qid}_choice_radio") == "✍️ I'll write my own answer":
-        st.session_state["answers"][qid] = {"choice_idx": None, "free_text": val}
+    val = (st.session_state.get(f"{qid}__free") or "").strip()
+    prev = st.session_state["answers_by_qid"].get(qid, {})
+    if st.session_state.get(f"{qid}__choice") == "✍️ I'll write my own answer":
+        st.session_state["answers_by_qid"][qid] = {"choice_idx": None, "free_text": val}
     else:
-        st.session_state["answers"][qid] = {"choice_idx": prev.get("choice_idx"), "free_text": ""}
+        st.session_state["answers_by_qid"][qid] = {"choice_idx": prev.get("choice_idx"), "free_text": ""}
 
 for q in questions:
     qid = q["id"]
@@ -705,7 +690,7 @@ for q in questions:
     placeholder = "— Select —"
     options = [placeholder] + base_options + [write_in_label]
 
-    saved = st.session_state["answers"].get(qid, {})
+    saved = st.session_state["answers_by_qid"].get(qid, {})
     saved_idx = saved.get("choice_idx", None)
     saved_free = saved.get("free_text", "")
 
@@ -716,22 +701,22 @@ for q in questions:
     else:
         current_label = placeholder
 
-    st.session_state.setdefault(f"{qid}_choice_radio", current_label)
+    st.session_state.setdefault(f"{qid}__choice", current_label)
 
     st.radio(
         "Choose one:",
         options,
-        key=f"{qid}_choice_radio",
+        key=f"{qid}__choice",
         on_change=_save_choice,
         args=(qid, base_options, placeholder, write_in_label),
         horizontal=False,
     )
 
-    if st.session_state.get(f"{qid}_choice_radio") == write_in_label:
+    if st.session_state.get(f"{qid}__choice") == write_in_label:
         st.text_area(
             "Your answer",
             value=saved_free,
-            key=f"{qid}_free_text",
+            key=f"{qid}__free",
             height=80,
             placeholder="Type your own response…",
             on_change=_save_free,
@@ -740,11 +725,11 @@ for q in questions:
 
     st.divider()
 
-# Optional manual snapshot button (data already lives in session_state)
+# Optional “save” (inputs are already persisted in session_state)
 if st.button("Save my answers"):
     st.success("Saved! Scroll down to generate your PDF when ready.")
 
-# Email + consent
+# Email + consent (form only here is fine)
 st.subheader("Email & Download")
 with st.form("finish_form"):
     email_val = st.text_input("Your email (for your download link)", key="email_input", placeholder="you@example.com")
@@ -763,11 +748,11 @@ with st.form("finish_form"):
             st.session_state["request_report"] = True
             st.toast("Generating your report…", icon="⏳")
 
-# Generate
+# Generate on flag
 if st.session_state.get("request_report"):
     st.session_state["request_report"] = False
 
-    answers = st.session_state.get("answers", {})
+    answers = st.session_state.get("answers_by_qid", {})
     scores = compute_scores(answers, questions)
     top3 = top_themes(scores, 3)
 
@@ -781,7 +766,7 @@ if st.session_state.get("request_report"):
     sections = {"weekly_plan": [], "actions": [], "from_words": {}, "weights": {}}
     if USE_AI:
         maybe = ai_sections_and_weights(
-            scores, top3, free_responses, st.session_state.get("first_name", ""), horizon_weeks=horizon_weeks
+            scores, top3, free_responses, st.session_state.get("first_name", ""), horizon_weeks=4
         )
         dbg = st.session_state.get("ai_debug") or {}
         tok = st.session_state.get("token_usage") or {}
@@ -820,11 +805,11 @@ if st.session_state.get("request_report"):
             for qid, wmap in weights.items():
                 for theme, delta in wmap.items():
                     scores[theme] = scores.get(theme, 0) + int(delta)
-            sections["horizon_weeks"] = horizon_weeks
+            sections["horizon_weeks"] = 4
         else:
             st.warning("AI could not generate JSON this run — using a concise template instead.")
 
-    # Minimal fallback if AI missing
+    # minimal fallback if AI missing
     if not sections.get("deep_insight"):
         top1 = top3[0] if top3 else "what energizes you"
         sections.update({
@@ -844,11 +829,10 @@ if st.session_state.get("request_report"):
                 "Review your week and set the next tiny step.",
             ],
             "future_snapshot": (
-                f"It is {horizon_weeks} weeks later. You have stayed close to what matters, "
-                f"protecting time for {top1}. A few tiny actions, repeated, build confidence. "
+                f"It is 4 weeks later. You have stayed close to {top1}. A few tiny actions, repeated, build confidence. "
                 "You pause, adjust, and keep going."
             ),
-            "horizon_weeks": horizon_weeks,
+            "horizon_weeks": 4,
             "archetype": "",
             "core_need": "",
             "affirmation": "",
@@ -867,18 +851,12 @@ if st.session_state.get("request_report"):
     pdf_bytes = make_pdf_bytes(
         st.session_state.get("first_name", ""),
         st.session_state.get("email", ""),
-        scores,
-        top3,
-        sections,
-        free_responses,
-        logo_path,
+        scores, top3, sections, free_responses, logo_path
     )
-    safe_bytes = to_bytes(pdf_bytes)
-
     st.success("Your personalized report is ready!")
     st.download_button(
         "📥 Download Your PDF Report",
-        data=safe_bytes,
+        data=to_bytes(pdf_bytes),
         file_name="LifeMinusWork_Reflection_Report.pdf",
         mime="application/pdf",
     )
@@ -904,7 +882,7 @@ if st.session_state.get("request_report"):
     except Exception as e:
         st.caption(f"Could not save responses (demo only). {e}")
 
-# ---------- AI status quick test ----------
+# Quick AI test
 with st.expander("AI status (debug)", expanded=False):
     st.write("AI enabled:", USE_AI)
     st.write("Model:", HIGH_MODEL)
@@ -912,10 +890,7 @@ with st.expander("AI status (debug)", expanded=False):
     if USE_AI and st.button("Test OpenAI now"):
         try:
             raw, usage, path = _call_openai_json(
-                HIGH_MODEL,
-                "Return strict JSON only.",
-                'Return {"ok": true} as JSON.',
-                cap=128,
+                HIGH_MODEL, "Return strict JSON only.", 'Return {"ok": true} as JSON.', cap=128
             )
             msg = f"OK — via {path}. Output: {raw}"
             if usage:
