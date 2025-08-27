@@ -765,8 +765,6 @@ with st.form("finish_form"):
         value=st.session_state.get("consent_input", False),
     )
     submit_clicked = st.form_submit_button("Generate My Personalized Report")
-st.caption("⏳ This can take up to 1 minute")
-
     if submit_clicked:
         if not email_val or not consent_val:
             st.error("Please enter your email and give consent to continue.")
