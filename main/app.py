@@ -395,22 +395,48 @@ Tone: empathetic, encouraging, plain language. No medical claims.
 
 # --------- PDF helpers ----------
 def draw_scores_barchart(pdf: FPDF, scores: Dict[str, int]):
+    """Render a simple horizontal bar chart.
+    - Positive scores get a bar.
+    - Zero/negative scores show no bar, but we still print the value (e.g., -4).
+    """
     setf(pdf, "B", 14); mc(pdf, "Your Theme Snapshot")
     setf(pdf, "", 12)
-    max_score = max(max(scores.values()), 1)
+
+    # Scale only by the largest *positive* value so negatives don’t invert bars.
+    positive_vals = [v for v in scores.values() if v > 0]
+    max_pos = max(positive_vals) if positive_vals else 1
+
     bar_w_max = 120
     x_left = pdf.get_x() + 10
     y = pdf.get_y()
+
     for theme in THEMES:
-        val = scores.get(theme, 0)
-        bar_w = (val / max_score) * bar_w_max
+        val = int(scores.get(theme, 0))
+
+        # Label on the left
         pdf.set_xy(x_left, y)
         pdf.cell(35, 6, _ascii_only(theme))
-        pdf.set_fill_color(30, 144, 255)
-        pdf.rect(x_left + 38, y + 1.3, bar_w, 4.5, "F")
-        pdf.set_xy(x_left + 38 + bar_w + 2, y)
+
+        # Bar area baseline
+        bar_x = x_left + 38
+        bar_h = 4.5
+
+        # Only draw a bar for positive values
+        if val > 0:
+            bar_w = (val / max_pos) * bar_w_max
+            pdf.set_fill_color(30, 144, 255)
+            pdf.rect(bar_x, y + 1.3, bar_w, bar_h, "F")
+            num_x = bar_x + bar_w + 2
+        else:
+            # No bar for zero/negative; place the number just after the baseline start
+            num_x = bar_x + 2
+
+        # Print the numeric value (can be negative)
+        pdf.set_xy(num_x, y)
         pdf.cell(0, 6, _ascii_only(str(val)))
+
         y += 7
+
     pdf.set_y(y + 4)
 
 def paragraph(pdf: FPDF, title: str, body: str):
