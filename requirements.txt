@@ -10,3 +10,6 @@ Pillow>=10.3.0
 
 # OpenAI Python SDK (Responses API). This pulls httpx & pydantic automatically.
 openai>=1.60.0
+
+gspread==6.1.4
+google-auth==2.33.0
