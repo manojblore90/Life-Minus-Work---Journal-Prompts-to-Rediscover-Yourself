@@ -123,7 +123,7 @@
     },
     {
       "id": "q11_habit",
-      "text": "Pick the habit that would change most in 30 days:",
+      "text": "Pick the habit that would change you the most in 30 days:",
       "choices": [
         {"label": "Identity check-in (2 min)",     "weights": {"Identity": 2}},
         {"label": "Practice block (15–20 min)",    "weights": {"Growth": 2}},
@@ -135,7 +135,7 @@
     },
     {
       "id": "q12_tradeoff",
-      "text": "If you had to trade one thing a little to gain a lot, you’d trade…",
+      "text": "If you had to trade a little of one thing, to get a lot of another, you'd trade…",
       "choices": [
         {"label": "Certainty for authenticity",    "weights": {"Identity": 2, "Peace": -1}},
         {"label": "Comfort for growth",            "weights": {"Growth": 2, "Peace": -1}},
