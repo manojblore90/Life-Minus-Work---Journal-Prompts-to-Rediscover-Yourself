@@ -11,6 +11,7 @@ import time
 import hashlib
 import smtplib
 import unicodedata
+import gspread
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 from email.message import EmailMessage
@@ -76,6 +77,9 @@ TEST_EMAIL_TO = st.secrets.get("LW_TEST_EMAIL_TO", "")
 ALLOW_SHOW_CODE_BTN = (os.getenv("LW_ALLOW_SHOW_CODE_BUTTON", st.secrets.get("LW_ALLOW_SHOW_CODE_BUTTON", "0")) == "1")
 SMTP_DEBUG_ON = (os.getenv("LW_SMTP_DEBUG", st.secrets.get("LW_SMTP_DEBUG", "0")) == "1")
 
+# Google Sheets
+LW_SHEET_URL = st.secrets.get("LW_SHEET_URL", "").strip()
+LW_SHEET_WORKSHEET = st.secrets.get("LW_SHEET_WORKSHEET", "emails")
 
 def here() -> Path:
     return Path(__file__).parent
@@ -309,6 +313,60 @@ def ensure_state(questions: List[dict]):
         st.session_state["free_by_qid"] = {q["id"]: old_f.get(q["id"], "") for q in questions}
         st.session_state["q_version"] = ver
 
+# =============================================================================
+# Google Sheets (durable email capture) — optional, falls back to CSV
+# =============================================================================
+
+def gsheets_enabled() -> bool:
+    try:
+        return bool(st.secrets.get("gcp_service_account")) and bool(LW_SHEET_URL)
+    except Exception:
+        return False
+
+@st.cache_resource(show_spinner=False)
+def get_gspread_client():
+    sa = st.secrets.get("gcp_service_account", None)
+    if not sa:
+        raise RuntimeError("gcp_service_account not found in secrets")
+    return gspread.service_account_from_dict(sa)
+
+@st.cache_resource(show_spinner=False)
+def get_email_worksheet():
+    """Open the target spreadsheet + worksheet; create header row if needed."""
+    if not gsheets_enabled():
+        raise RuntimeError("Google Sheets not configured")
+    gc = get_gspread_client()
+    sh = gc.open_by_url(LW_SHEET_URL)
+    try:
+        ws = sh.worksheet(LW_SHEET_WORKSHEET)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sh.add_worksheet(title=LW_SHEET_WORKSHEET, rows=1000, cols=8)
+    # Ensure header
+    header = ["email", "first_name", "verified_at", "model", "scores", "source"]
+    existing = ws.row_values(1)
+    if [h.strip().lower() for h in existing] != header:
+        ws.resize(rows=max(1000, ws.row_count))
+        ws.update("A1:F1", [header])
+    return ws
+
+def log_email_capture_gsheet(row: dict):
+    """Append a row to Google Sheets."""
+    ws = get_email_worksheet()
+    values = [
+        (row.get("email") or "").strip().lower(),
+        (row.get("first_name") or "").strip(),
+        (row.get("verified_at") or "").strip(),
+        (row.get("model") or "").strip(),
+        (row.get("scores") or "").strip(),   # JSON string
+        (row.get("source") or "").strip(),
+    ]
+    ws.append_row(values, value_input_option="USER_ENTERED")
+
+def load_email_log_gsheet() -> list[dict]:
+    """Read all rows from Google Sheets as dicts (skips header)."""
+    ws = get_email_worksheet()
+    return ws.get_all_records()
+
 
 # =============================================================================
 # Email capture CSV (no extra deps)
@@ -318,7 +376,7 @@ EMAIL_LOG_CSV = here() / "emails.csv"
 
 
 def log_email_capture(email: str, first_name: str = "", meta: dict | None = None):
-    """Append a row to emails.csv (no extra deps)."""
+    """Durable capture to Google Sheets if configured; otherwise CSV fallback."""
     meta = meta or {}
     row = {
         "email": (email or "").strip().lower(),
@@ -328,12 +386,23 @@ def log_email_capture(email: str, first_name: str = "", meta: dict | None = None
         "scores": json.dumps(meta.get("scores") or {}),
         "source": meta.get("source", "verify"),
     }
+
+    # Try Google Sheets first
+    try:
+        if gsheets_enabled():
+            log_email_capture_gsheet(row)
+            return
+    except Exception as e:
+        st.warning(f"(Sheets capture failed; falling back to CSV) {e}")
+
+    # CSV fallback (your existing local path/logic)
     created = not EMAIL_LOG_CSV.exists()
     with EMAIL_LOG_CSV.open("a", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=row.keys())
         if created:
             w.writeheader()
         w.writerow(row)
+
 
 
 def load_email_log() -> list[dict]:
@@ -1263,20 +1332,34 @@ if st.session_state.get("verify_state") == "verified":
 
 if SHOW_EMAILS_ADMIN:
     with st.expander("Captured emails (admin)", expanded=False):
-        rows = load_email_log()
+        using_sheets = gsheets_enabled()
+        st.write(f"Storage: {'Google Sheets' if using_sheets else 'CSV (local)'}")
+
+        rows: list[dict] = []
+        try:
+            if using_sheets:
+                rows = load_email_log_gsheet()
+            else:
+                rows = load_email_log()
+        except Exception as e:
+            st.error(f"Could not load emails: {e}")
+            rows = []
+
         st.write(f"Total captured: {len(rows)}")
         if rows:
             st.dataframe(rows, use_container_width=True)
             st.markdown("**By domain:**")
             st.json(group_emails_by_domain(rows))
-            st.download_button(
-                "Download emails.csv",
-                data=EMAIL_LOG_CSV.read_bytes(),
-                file_name="emails.csv",
-                mime="text/csv",
-            )
+            if not using_sheets:
+                st.download_button(
+                    "Download emails.csv",
+                    data=EMAIL_LOG_CSV.read_bytes() if EMAIL_LOG_CSV.exists() else b"",
+                    file_name="emails.csv",
+                    mime="text/csv",
+                )
         else:
             st.info("No emails captured yet.")
+
 
     with st.expander("Email diagnostics (admin)", expanded=False):
         st.write(f"Sender (GMAIL_USER): {GMAIL_USER!r}")
